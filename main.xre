@@ -1,0 +1,17 @@
+// main.xre - implementacja
+include "utils.xrh";
+
+public fn add(a: i32, b: i32) -> i32 {
+    a + b;
+}
+
+public fn multiply(a: i32, b: i32) -> i32 {
+    a * b;
+}
+
+public fn main() -> i32 {
+    let x: i32 = add $ (10, 20);
+    let y: i32 = multiply $ (5, 3);
+    x $~ y;
+    0;
+}

@@ -1,0 +1,31 @@
+public fn calc(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
+    let t1: i32 = a + b;
+    let t2: i32 = c + d;
+    let t3: i32 = e + f;
+    let t4: i32 = t1 * t2;
+    let t5: i32 = t4 - t3;
+    let t6: i32 = t5 / 5;
+    let t7: i32 = t6 % 7;
+    t7;
+}
+public fn one_if(cond: bool) -> i32 {
+    if cond {
+        1;
+    } else {
+        0;
+    };
+}
+public fn cmp_check(a: i32, b: i32) -> i32 {
+    let r1: i32 = one_if $ (a == b);
+    let r2: i32 = one_if $ (a != b);
+    let r3: i32 = one_if $ (a <= b);
+    let r4: i32 = one_if $ (a >= b);
+    let s1: i32 = r1 + r2;
+    let s2: i32 = r3 + r4;
+    s1 + s2;
+}
+public fn main() -> i32 {
+    let x: i32 = calc $ (1, 2, 3, 4, 5, 6);
+    let y: i32 = cmp_check $ (10, 20);
+    x + y;
+}
