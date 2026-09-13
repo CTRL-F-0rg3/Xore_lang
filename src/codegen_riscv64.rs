@@ -260,6 +260,46 @@ impl RiscV64CodeGen {
                 let s = self.read(alloc, locals_bytes, *src, SCRATCH2);
                 writeln!(self.out, "    sd {}, 0(t2)", s).unwrap();
             }
+            IrInstruction::LoadAddr { dst, base_offset } => {
+                // "Rozpad" tablicy lokalnej do wskaźnika - liczy adres slotu
+                // bez odczytu spod niego (odpowiednik C-owego `&arr[0]`).
+                let work = Self::work_reg(alloc, *dst);
+                writeln!(self.out, "    li {}, {}", work, HEADER_BYTES + (-*base_offset)).unwrap();
+                writeln!(self.out, "    sub {}, s0, {}", work, work).unwrap();
+                self.write_home(alloc, locals_bytes, *dst, work);
+            }
+            IrInstruction::LoadIndexedPtr { dst, base, index, elem_size } => {
+                // Jak LoadIndexed, ale baza to wartość w rejestrze (wskaźnik
+                // z runtime, np. parametr tablicowy), nie stały offset w
+                // bieżącej ramce.
+                let b = self.read(alloc, locals_bytes, *base, "t2");
+                if b != "t2" {
+                    writeln!(self.out, "    mv t2, {}", b).unwrap();
+                }
+                let idx = self.read(alloc, locals_bytes, *index, SCRATCH2);
+                if idx != SCRATCH2 {
+                    writeln!(self.out, "    mv {}, {}", SCRATCH2, idx).unwrap();
+                }
+                Self::emit_scale(&mut self.out, SCRATCH2, *elem_size);
+                writeln!(self.out, "    sub t2, t2, {}", SCRATCH2).unwrap();
+                let work = Self::work_reg(alloc, *dst);
+                writeln!(self.out, "    ld {}, 0(t2)", work).unwrap();
+                self.write_home(alloc, locals_bytes, *dst, work);
+            }
+            IrInstruction::StoreIndexedPtr { base, index, src, elem_size } => {
+                let b = self.read(alloc, locals_bytes, *base, "t2");
+                if b != "t2" {
+                    writeln!(self.out, "    mv t2, {}", b).unwrap();
+                }
+                let idx = self.read(alloc, locals_bytes, *index, SCRATCH2);
+                if idx != SCRATCH2 {
+                    writeln!(self.out, "    mv {}, {}", SCRATCH2, idx).unwrap();
+                }
+                Self::emit_scale(&mut self.out, SCRATCH2, *elem_size);
+                writeln!(self.out, "    sub t2, t2, {}", SCRATCH2).unwrap();
+                let s = self.read(alloc, locals_bytes, *src, SCRATCH2);
+                writeln!(self.out, "    sd {}, 0(t2)", s).unwrap();
+            }
             IrInstruction::StoreMem { dst, src } => {
                 let addr = match dst {
                     Location::StackSlot(off) => Self::slot_addr(*off),

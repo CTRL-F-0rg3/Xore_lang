@@ -154,6 +154,26 @@ fn fold_branches(func: &mut IrFunction) -> bool {
 /// (potencjalny cel skoku z innej ścieżki) - to konserwatywne, ale zawsze
 /// poprawne podejście bez pełnej analizy przepływu sterowania.
 fn mem_forward(func: &mut IrFunction) -> bool {
+    // Jeśli funkcja bierze adres jakiegokolwiek slotu na stosie
+    // (`LoadAddr` - dzieje się to, gdy tablica lokalna "rozpada się" do
+    // wskaźnika, np. przekazana jako argument wywołania), to jej pamięć
+    // może być czytana ALBO ZAPISYWANA przez wywołaną funkcję poprzez ten
+    // wskaźnik (patrz `StoreIndexedPtr`) - czyli w sposób NIEWIDOCZNY dla
+    // tej analizy (żaden `LoadMem`/`StoreMem` w tej funkcji tego nie pokazuje).
+    // Bez tego zabezpieczenia:
+    //   - "martwe zapisy" inicjalizujące tablicę zostałyby usunięte, bo
+    //     nigdy nie są odczytane LOKALNIE (tylko przez wywołaną funkcję) -
+    //     to realny bug znaleziony przy testowaniu (tablica przekazana do
+    //     funkcji wracała z samymi zerami),
+    //   - odczyt po wywołaniu funkcji mógłby dostać przeterminowaną,
+    //     podstawioną wartość sprzed wywołania, jeśli wywołana funkcja
+    //     zmodyfikowała tablicę przez wskaźnik.
+    // Konserwatywne, zawsze poprawne rozwiązanie: dla takich funkcji w
+    // ogóle wyłączamy ten przebieg.
+    if func.instructions.iter().any(|i| matches!(i, IrInstruction::LoadAddr { .. })) {
+        return false;
+    }
+
     let mut changed = false;
     let n = func.instructions.len();
 
@@ -186,6 +206,15 @@ fn mem_forward(func: &mut IrFunction) -> bool {
                 *index = resolve(&alias, *index);
             }
             IrInstruction::StoreIndexed { index, src, .. } => {
+                *index = resolve(&alias, *index);
+                *src = resolve(&alias, *src);
+            }
+            IrInstruction::LoadIndexedPtr { base, index, .. } => {
+                *base = resolve(&alias, *base);
+                *index = resolve(&alias, *index);
+            }
+            IrInstruction::StoreIndexedPtr { base, index, src, .. } => {
+                *base = resolve(&alias, *base);
                 *index = resolve(&alias, *index);
                 *src = resolve(&alias, *src);
             }
@@ -310,6 +339,15 @@ fn dead_code_elim(func: &mut IrFunction) -> bool {
                 used.insert(*index);
                 used.insert(*src);
             }
+            IrInstruction::LoadIndexedPtr { base, index, .. } => {
+                used.insert(*base);
+                used.insert(*index);
+            }
+            IrInstruction::StoreIndexedPtr { base, index, src, .. } => {
+                used.insert(*base);
+                used.insert(*index);
+                used.insert(*src);
+            }
             IrInstruction::Call { args, .. } => {
                 for a in args {
                     used.insert(*a);
@@ -333,13 +371,16 @@ fn dead_code_elim(func: &mut IrFunction) -> bool {
             | IrInstruction::LoadImm { dst, .. }
             | IrInstruction::LoadMem { dst, .. }
             | IrInstruction::LoadIndexed { dst, .. }
+            | IrInstruction::LoadAddr { dst, .. }
+            | IrInstruction::LoadIndexedPtr { dst, .. }
             | IrInstruction::BinaryOp { dst, .. }
                 if !used.contains(&dst) =>
             {
                 changed = true;
-                // usunięte - brak efektów ubocznych (LoadIndexed to czysty
-                // odczyt pamięci stosu, bezpieczny do usunięcia tak samo
-                // jak LoadMem, gdy nikt nie czyta wyniku)
+                // usunięte - brak efektów ubocznych (LoadIndexed/LoadAddr/
+                // LoadIndexedPtr to czyste odczyty/obliczenia adresu,
+                // bezpieczne do usunięcia tak samo jak LoadMem, gdy nikt nie
+                // czyta wyniku)
                 let _ = dst;
             }
             IrInstruction::Call { dst: Some(d), func: f, args } if !used.contains(&d) => {

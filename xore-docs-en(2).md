@@ -241,20 +241,50 @@ arr[2];          // read at a compile-time-constant index -> 30
   no scaled-addressing instruction).
 - Writing to an array element uses the same `$~` operator as everything
   else: `value $~ arr[index];`.
+- **Whole-array copy** works: `let b = a;` (where `a` is a known local
+  array) deep-copies all N elements into N new slots — verified to be a
+  real copy, not an alias (mutating `b` afterward doesn't affect `a`).
+- **Arrays can be passed to functions.** A local array used as a plain
+  value (e.g. a call argument) decays to a pointer to its first element,
+  exactly like in C:
+
+  ```xore
+  public fn sum3(arr: [i32; 3]) -> i32 {
+      arr[0] + arr[1] + arr[2];   // indexes through the pointer
+  }
+  public fn main() -> i32 {
+      let a: [i32; 3] = [10, 20, 30];
+      sum3 $ (a);   // -> 60
+  }
+  ```
+
+  Since this is pass-by-reference, a function **can** mutate the caller's
+  array through `$~`, and the caller sees the change after the call
+  returns — verified with a test where a callee zeroes `arr[0]` and the
+  caller's subsequent read reflects it.
 
 **Current scope (deliberately limited, documented rather than silently
 broken):**
-- Arrays are **local only** — you can't pass one to a function or return
-  one from a function yet.
-- An array can only be produced by a literal directly assigned to a `let`
-  (`let arr: [T;N] = [...];`). Copying a whole array from one variable to
-  another (`let b = a;` where `a` is an array) isn't supported yet.
+- **Returning an array from a function is rejected outright** at
+  compile time with a clear error, rather than silently generating wrong
+  code — it would need an `sret`-style ABI convention (caller allocates
+  space, passes a hidden pointer) that doesn't exist yet.
 - Indexing only works directly on a named array variable (`arr[i]`), not on
   an arbitrary expression (`f()[i]` isn't supported).
 - No multi-dimensional arrays, no runtime bounds checking.
 - Mixed-type array literals (`[1, True]`) are now correctly rejected by the
   type checker — this used to silently pass (a real bug fixed while adding
   this feature).
+
+**A subtle aliasing bug found and fixed while adding function parameters:**
+the store→load forwarding optimization didn't know that `LoadAddr` (the
+instruction behind array-to-pointer decay) lets a local array's address
+escape to another function. It was treating the array's initializing
+stores as "dead" (never read *locally*) and deleting them — so `sum3(a)`
+above returned `0` instead of `60` until this was fixed. The fix is
+conservative but always correct: any function that takes the address of a
+local array has this whole optimization pass disabled for it (a small,
+scoped cost, only for functions that pass arrays by reference).
 
 ## No I/O (by design, for now)
 
@@ -302,9 +332,9 @@ this compiler does today.
   design decision of Xore, not an oversight.
 - **No I/O at all** (see [No I/O](#no-io-by-design-for-now) above) — the
   only observable result is `main`'s exit code.
-- **Arrays have a limited scope** (see [Arrays](#arrays) above): local-only,
-  no passing to/from functions, no whole-array copy, no multi-dimensional
-  arrays, no bounds checking.
+- **Arrays have a limited scope** (see [Arrays](#arrays) above): no
+  multi-dimensional arrays, no runtime bounds checking, no returning an
+  array from a function (rejected outright, not silently broken).
 - **`enum` is still a stub.** It parses and passes type-checking, but
   generates no code at all and has no way to reference a variant.
 - **`public`/private visibility is not enforced.** It parses, but nothing

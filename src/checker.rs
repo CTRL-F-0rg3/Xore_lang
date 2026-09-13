@@ -111,9 +111,16 @@ impl SemanticChecker {
                 self.push_scope();
 
                 for (param_name, param_type) in params {
+                    // Parametry tablicowe są przekazywane przez wskaźnik
+                    // (patrz `lowering.rs`/README) - zapis do ICH ELEMENTU
+                    // przez `$~` jest sensowną, zamierzoną operacją (modyfikuje
+                    // pamięć wywołującego przez ten wskaźnik), więc muszą być
+                    // `is_mut: true`. Zwykłe (skalarne) parametry zostają
+                    // `false` - to świadomie osobna decyzja, niezmieniona.
+                    let is_mut = matches!(param_type, Type::Array(..));
                     self.current_scope_mut().insert(
                         param_name.clone(),
-                                                    VariableInfo { typ: param_type.clone(), is_mut: false },
+                                                    VariableInfo { typ: param_type.clone(), is_mut },
                     );
                 }
 

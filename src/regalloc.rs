@@ -66,6 +66,17 @@ fn compute_intervals(func: &IrFunction) -> Vec<Interval> {
                 note_use(*index, i, &mut last_use);
                 note_use(*src, i, &mut last_use);
             }
+            IrInstruction::LoadAddr { dst, .. } => note_def(*dst, i, &mut def),
+            IrInstruction::LoadIndexedPtr { dst, base, index, .. } => {
+                note_def(*dst, i, &mut def);
+                note_use(*base, i, &mut last_use);
+                note_use(*index, i, &mut last_use);
+            }
+            IrInstruction::StoreIndexedPtr { base, index, src, .. } => {
+                note_use(*base, i, &mut last_use);
+                note_use(*index, i, &mut last_use);
+                note_use(*src, i, &mut last_use);
+            }
             IrInstruction::BinaryOp { dst, left, right, .. } => {
                 note_def(*dst, i, &mut def);
                 note_use(*left, i, &mut last_use);

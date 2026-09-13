@@ -10,11 +10,17 @@ pub struct Lowering {
     functions: Vec<IrFunction>,
     current_func: Option<IrFunction>,
     var_map: HashMap<String, Location>,
-    /// Tablice: nazwa -> (offset elementu 0, liczba elementów). Osobna mapa,
-    /// bo tablica zajmuje wiele kolejnych slotów na stosie, nie jeden - i bo
-    /// indeksowanie musi znać jej długość (na przyszłość: sprawdzanie
-    /// zakresu) niezależnie od `var_map`.
+    /// Tablice lokalne (zadeklarowane przez `let arr: [T;N] = [...]` w tej
+    /// funkcji): nazwa -> (offset elementu 0, liczba elementów). Osobna
+    /// mapa, bo tablica zajmuje wiele kolejnych slotów na stosie, nie jeden.
     array_map: HashMap<String, (i32, usize)>,
+    /// Parametry funkcji typu tablicowego (`fn f(a: [i32;3])`): nazwa ->
+    /// liczba elementów. Taki parametr "rozpada się" do wskaźnika (adresu
+    /// elementu 0 w ramce WYWOŁUJĄCEGO) - jego wartość jest zwykłym
+    /// skalarem w `var_map` (jak każdy inny parametr), ale `Expr::Index`
+    /// musi wiedzieć, że trzeba adresować PRZEZ tę wartość (`LoadIndexedPtr`),
+    /// a nie traktować ją jak zwykłą liczbę. Resetowana na starcie każdej funkcji.
+    ptr_array_params: std::collections::HashSet<String>,
     stack_offset: i32,
     next_label_id: u32,
 }
@@ -43,6 +49,7 @@ impl Lowering {
             current_func: None,
             var_map: HashMap::new(),
             array_map: HashMap::new(),
+            ptr_array_params: std::collections::HashSet::new(),
             stack_offset: 0,
             next_label_id: 0,
         }
@@ -107,6 +114,20 @@ impl Lowering {
                     self.functions.push(func);
                 }
 
+                // Zwracanie tablic z funkcji wymagałoby konwencji ABI typu
+                // "sret" (wywołujący rezerwuje miejsce i przekazuje adres),
+                // której dziś nie mamy. Zamiast po cichu wygenerować zły
+                // kod (np. zwrócić tylko pierwszy element), odmawiamy
+                // kompilacji tego przypadku wprost.
+                if let Some(Type::Array(..)) = return_type {
+                    return Err(LoweringError {
+                        message: format!(
+                            "Funkcja '{}': zwracanie tablic z funkcji nie jest jeszcze obsługiwane",
+                            name
+                        ),
+                    });
+                }
+
                 self.current_func = Some(IrFunction {
                     name: name.clone(),
                                          params: params.clone(),
@@ -116,6 +137,15 @@ impl Lowering {
                                          next_temp: 0,
                 });
                 self.var_map.clear();
+                // `array_map`/`ptr_array_params` też muszą być czyszczone na
+                // starcie każdej funkcji - inaczej tablica lokalna z
+                // poprzednio lowerowanej funkcji zostawiałaby "duchowy" wpis
+                // ze starym (nieaktualnym w nowej ramce) offsetem, co przy
+                // koincydencji nazw dałoby błędny adres. To był realny,
+                // utajony bug (nigdy się nie ujawnił, bo dotychczasowe testy
+                // nie używały tej samej nazwy tablicy w dwóch funkcjach).
+                self.array_map.clear();
+                self.ptr_array_params.clear();
                 self.stack_offset = 0;
 
                 self.emit(IrInstruction::Label(format!("func_{}", name)));
@@ -135,6 +165,16 @@ impl Lowering {
                     let ptemp = self.new_temp();
                     self.emit(IrInstruction::LoadParam { dst: ptemp, index: i });
                     self.emit(IrInstruction::StoreMem { dst: loc, src: ptemp });
+
+                    // Parametr tablicowy "rozpada się" do wskaźnika (adresu
+                    // elementu 0 w ramce wywołującego) - jego WARTOŚĆ jest
+                    // zwykłym skalarem (obsłużonym wyżej jak każdy inny
+                    // parametr), ale trzeba zapamiętać, że indeksowanie tej
+                    // nazwy musi iść przez `LoadIndexedPtr`, nie przez stały
+                    // offset w bieżącej ramce.
+                    if matches!(param_type, Type::Array(..)) {
+                        self.ptr_array_params.insert(param_name.clone());
+                    }
                 }
 
                 // Ostatnia instrukcja-wyrażenie w ciele funkcji jest niejawną
@@ -178,6 +218,39 @@ impl Lowering {
                     return Ok(());
                 }
 
+                // Kopia całej tablicy lokalnej: `let b = a;` (albo z jawną
+                // adnotacją typu) gdy `a` jest znaną tablicą lokalną -
+                // kopiujemy jej N elementów do N nowych slotów. Uwaga: jeśli
+                // `a` jest parametrem tablicowym (wskaźnikiem - patrz
+                // `ptr_array_params`), to NIE trafia tutaj, tylko w zwykłą
+                // ścieżkę skalarną niżej, więc `b` dostanie kopię WSKAŹNIKA
+                // (alias tej samej pamięci), nie głęboką kopię - spójne z
+                // tym, że parametr tablicowy i tak jest już tylko wskaźnikiem
+                // (patrz README, sekcja o tablicach).
+                if let Expr::Variable(src_name) = value.as_ref() {
+                    if let Some(&(src_elem0, len)) = self.array_map.get(src_name) {
+                        let mut dst_elem0_offset = 0;
+                        for i in 0..len {
+                            let val_temp = self.new_temp();
+                            self.emit(IrInstruction::LoadMem {
+                                dst: val_temp,
+                                src: Location::StackSlot(src_elem0 - 8 * (i as i32)),
+                            });
+                            self.stack_offset -= 8;
+                            if i == 0 {
+                                dst_elem0_offset = self.stack_offset;
+                            }
+                            let dst_slot = Location::StackSlot(self.stack_offset);
+                            if let Some(func) = &mut self.current_func {
+                                func.locals.push((format!("{}[{}]", name, i), Type::Unknown));
+                            }
+                            self.emit(IrInstruction::StoreMem { dst: dst_slot, src: val_temp });
+                        }
+                        self.array_map.insert(name.clone(), (dst_elem0_offset, len));
+                        return Ok(());
+                    }
+                }
+
                 self.stack_offset -= 8;
                 let loc = Location::StackSlot(self.stack_offset);
                 self.var_map.insert(name.clone(), loc.clone());
@@ -217,6 +290,15 @@ impl Lowering {
                 if let Some(loc) = self.var_map.get(name).cloned() {
                     let dst = self.new_temp();
                     self.emit(IrInstruction::LoadMem { dst, src: loc });
+                    Ok(dst)
+                } else if let Some(&(elem0_offset, _len)) = self.array_map.get(name) {
+                    // Tablica lokalna użyta jako zwykła wartość (np. argument
+                    // wywołania funkcji) "rozpada się" do wskaźnika - adresu
+                    // jej elementu 0 - dokładnie tak jak tablica w C. To
+                    // jedyny sposób przekazania tablicy lokalnej do innej
+                    // funkcji (patrz `ptr_array_params` i `Stmt::FnDef`).
+                    let dst = self.new_temp();
+                    self.emit(IrInstruction::LoadAddr { dst, base_offset: elem0_offset });
                     Ok(dst)
                 } else {
                     Err(LoweringError { message: format!("Undefined variable: {}", name) })
@@ -350,35 +432,56 @@ impl Lowering {
                         message: "Indeksowanie jest dziś obsługiwane tylko bezpośrednio na zmiennej tablicowej (np. `arr[i]`, nie `f()[i]`)".to_string(),
                     });
                 };
-                let (elem0_offset, _len) = *self.array_map.get(&name).ok_or_else(|| LoweringError {
-                    message: format!("'{}' nie jest zainicjalizowaną tablicą lokalną", name),
-                })?;
 
-                // Indeks znany w czasie kompilacji: zamień na zwykły
-                // LoadMem pod stałym adresem - korzysta z istniejących
-                // optymalizacji (store->load forwarding, DCE) tak samo jak
-                // każda inna zmienna, zamiast zawsze liczyć adres w runtime.
-                if let Expr::Literal(Literal::Int(s)) = index.as_ref() {
-                    let idx = parse_int_literal(s);
+                // Przypadek 1: tablica lokalna (`let arr = [...]`) - stały,
+                // znany w czasie kompilacji offset w bieżącej ramce.
+                if let Some(&(elem0_offset, _len)) = self.array_map.get(&name) {
+                    // Indeks znany w czasie kompilacji: zamień na zwykły
+                    // LoadMem pod stałym adresem - korzysta z istniejących
+                    // optymalizacji (store->load forwarding, DCE) tak samo jak
+                    // każda inna zmienna, zamiast zawsze liczyć adres w runtime.
+                    if let Expr::Literal(Literal::Int(s)) = index.as_ref() {
+                        let idx = parse_int_literal(s);
+                        let dst = self.new_temp();
+                        self.emit(IrInstruction::LoadMem {
+                            dst,
+                            src: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
+                        });
+                        return Ok(dst);
+                    }
+
+                    let idx_temp = self.lower_expr(index)?;
                     let dst = self.new_temp();
-                    self.emit(IrInstruction::LoadMem {
-                        dst,
-                        src: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
-                    });
+                    self.emit(IrInstruction::LoadIndexed { dst, base_offset: elem0_offset, index: idx_temp, elem_size: 8 });
                     return Ok(dst);
                 }
 
-                let idx_temp = self.lower_expr(index)?;
-                let dst = self.new_temp();
-                self.emit(IrInstruction::LoadIndexed { dst, base_offset: elem0_offset, index: idx_temp, elem_size: 8 });
-                Ok(dst)
+                // Przypadek 2: parametr tablicowy - wartość to WSKAŹNIK
+                // (adres w ramce WYWOŁUJĄCEGO), znany dopiero w runtime.
+                if self.ptr_array_params.contains(&name) {
+                    let base_loc = self.var_map.get(&name).cloned().ok_or_else(|| LoweringError {
+                        message: format!("Wewnętrzny błąd: brak lokalizacji parametru '{}'", name),
+                    })?;
+                    let base_temp = self.new_temp();
+                    self.emit(IrInstruction::LoadMem { dst: base_temp, src: base_loc });
+
+                    let idx_temp = self.lower_expr(index)?;
+                    let dst = self.new_temp();
+                    self.emit(IrInstruction::LoadIndexedPtr { dst, base: base_temp, index: idx_temp, elem_size: 8 });
+                    return Ok(dst);
+                }
+
+                Err(LoweringError {
+                    message: format!("'{}' nie jest ani zainicjalizowaną tablicą lokalną, ani parametrem tablicowym", name),
+                })
             }
         }
     }
 
     /// Loweruje zapis `wartosc $~ tablica[indeks];` - odpowiednik `StoreMem`
-    /// / `StoreIndexed` dla elementu tablicy, używany przez `BinaryOp` z
-    /// `SyncAssign` w przypadku, gdy prawa strona jest indeksowaniem.
+    /// / `StoreIndexed` / `StoreIndexedPtr` dla elementu tablicy, używany
+    /// przez `BinaryOp` z `SyncAssign` w przypadku, gdy prawa strona jest
+    /// indeksowaniem.
     fn lower_index_store(&mut self, array: &Expr, index: &Expr, src: Temp) -> Result<(), LoweringError> {
         let name = if let Expr::Variable(n) = array {
             n.clone()
@@ -387,21 +490,34 @@ impl Lowering {
                 message: "Zapis przez indeks jest dziś obsługiwany tylko bezpośrednio na zmiennej tablicowej".to_string(),
             });
         };
-        let (elem0_offset, _len) = *self.array_map.get(&name).ok_or_else(|| LoweringError {
-            message: format!("'{}' nie jest zainicjalizowaną tablicą lokalną", name),
-        })?;
 
-        if let Expr::Literal(Literal::Int(s)) = index {
-            let idx = parse_int_literal(s);
-            self.emit(IrInstruction::StoreMem {
-                dst: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
-                src,
-            });
+        if let Some(&(elem0_offset, _len)) = self.array_map.get(&name) {
+            if let Expr::Literal(Literal::Int(s)) = index {
+                let idx = parse_int_literal(s);
+                self.emit(IrInstruction::StoreMem {
+                    dst: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
+                    src,
+                });
+                return Ok(());
+            }
+            let idx_temp = self.lower_expr(index)?;
+            self.emit(IrInstruction::StoreIndexed { base_offset: elem0_offset, index: idx_temp, src, elem_size: 8 });
             return Ok(());
         }
 
-        let idx_temp = self.lower_expr(index)?;
-        self.emit(IrInstruction::StoreIndexed { base_offset: elem0_offset, index: idx_temp, src, elem_size: 8 });
-        Ok(())
+        if self.ptr_array_params.contains(&name) {
+            let base_loc = self.var_map.get(&name).cloned().ok_or_else(|| LoweringError {
+                message: format!("Wewnętrzny błąd: brak lokalizacji parametru '{}'", name),
+            })?;
+            let base_temp = self.new_temp();
+            self.emit(IrInstruction::LoadMem { dst: base_temp, src: base_loc });
+            let idx_temp = self.lower_expr(index)?;
+            self.emit(IrInstruction::StoreIndexedPtr { base: base_temp, index: idx_temp, src, elem_size: 8 });
+            return Ok(());
+        }
+
+        Err(LoweringError {
+            message: format!("'{}' nie jest ani zainicjalizowaną tablicą lokalną, ani parametrem tablicowym", name),
+        })
     }
 }

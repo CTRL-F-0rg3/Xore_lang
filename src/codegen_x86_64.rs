@@ -276,6 +276,52 @@ impl X86_64CodeGen {
                 let s = self.read(alloc, locals_bytes, *src, SCRATCH2);
                 writeln!(self.out, "    movq {}, ({})", s, SCRATCH1).unwrap();
             }
+            IrInstruction::LoadAddr { dst, base_offset } => {
+                // "Rozpad" tablicy lokalnej do wskaźnika - liczy adres slotu
+                // bez odczytu spod niego (odpowiednik C-owego `&arr[0]`,
+                // używane przy przekazywaniu tablicy jako argumentu).
+                let work = Self::work_reg(alloc, *dst);
+                writeln!(self.out, "    leaq {}, {}", Self::slot_addr(*base_offset), work).unwrap();
+                self.write_home(alloc, locals_bytes, *dst, work);
+            }
+            IrInstruction::LoadIndexedPtr { dst, base, index, elem_size } => {
+                // Jak LoadIndexed, ale baza to wartość w rejestrze (wskaźnik
+                // z runtime, np. parametr tablicowy), nie stały offset w
+                // bieżącej ramce.
+                let idx = self.read(alloc, locals_bytes, *index, SCRATCH2);
+                if idx != SCRATCH2 {
+                    writeln!(self.out, "    movq {}, {}", idx, SCRATCH2).unwrap();
+                }
+                if *elem_size != 1 {
+                    writeln!(self.out, "    imulq ${}, {}", elem_size, SCRATCH2).unwrap();
+                }
+                let b = self.read(alloc, locals_bytes, *base, SCRATCH1);
+                if b != SCRATCH1 {
+                    writeln!(self.out, "    movq {}, {}", b, SCRATCH1).unwrap();
+                }
+                writeln!(self.out, "    subq {}, {}", SCRATCH2, SCRATCH1).unwrap();
+                let work = Self::work_reg(alloc, *dst);
+                writeln!(self.out, "    movq ({}), {}", SCRATCH1, work).unwrap();
+                self.write_home(alloc, locals_bytes, *dst, work);
+            }
+            IrInstruction::StoreIndexedPtr { base, index, src, elem_size } => {
+                let idx = self.read(alloc, locals_bytes, *index, SCRATCH2);
+                if idx != SCRATCH2 {
+                    writeln!(self.out, "    movq {}, {}", idx, SCRATCH2).unwrap();
+                }
+                if *elem_size != 1 {
+                    writeln!(self.out, "    imulq ${}, {}", elem_size, SCRATCH2).unwrap();
+                }
+                let b = self.read(alloc, locals_bytes, *base, SCRATCH1);
+                if b != SCRATCH1 {
+                    writeln!(self.out, "    movq {}, {}", b, SCRATCH1).unwrap();
+                }
+                writeln!(self.out, "    subq {}, {}", SCRATCH2, SCRATCH1).unwrap();
+                // %r10 jest już wolny (adres policzony w %rax) - można go
+                // ponownie użyć do zmaterializowania wartości źródłowej.
+                let s = self.read(alloc, locals_bytes, *src, SCRATCH2);
+                writeln!(self.out, "    movq {}, ({})", s, SCRATCH1).unwrap();
+            }
             IrInstruction::StoreMem { dst, src } => {
                 let addr = match dst {
                     Location::StackSlot(off) => Self::slot_addr(*off),

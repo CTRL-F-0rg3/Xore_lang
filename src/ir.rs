@@ -36,6 +36,17 @@ pub enum IrInstruction {
     /// Zapis do elementu tablicy pod dynamicznym indeksem - symetrycznie do
     /// `LoadIndexed`.
     StoreIndexed { base_offset: i32, index: Temp, src: Temp, elem_size: i32 },
+    /// Liczy adres slotu na stosie (`ramka + base_offset`) i wkłada go do
+    /// rejestru jako zwykłą wartość (bez odczytu spod tego adresu). Używane,
+    /// gdy tablica lokalna "rozpada się" do wskaźnika (np. przekazana jako
+    /// argument wywołania funkcji - dokładnie jak w C).
+    LoadAddr { dst: Temp, base_offset: i32 },
+    /// Jak `LoadIndexed`, ale baza adresu jest wartością w rejestrze
+    /// (wskaźnikiem otrzymanym w runtime, np. jako parametr funkcji), a nie
+    /// stałym przesunięciem w bieżącej ramce stosu: `dst = *(base - index*elem_size)`.
+    LoadIndexedPtr { dst: Temp, base: Temp, index: Temp, elem_size: i32 },
+    /// Zapis symetryczny do `LoadIndexedPtr`.
+    StoreIndexedPtr { base: Temp, index: Temp, src: Temp, elem_size: i32 },
     BinaryOp { dst: Temp, left: Temp, op: IrBinOp, right: Temp },
     Call { dst: Option<Temp>, func: String, args: Vec<Temp> },
     Label(String),
@@ -101,6 +112,13 @@ fn format_instruction(instr: &IrInstruction) -> String {
         }
         IrInstruction::StoreIndexed { base_offset, index, src, elem_size } => {
             format!("store [base{}, {:?}*{}], {:?}", base_offset, index, elem_size, src)
+        }
+        IrInstruction::LoadAddr { dst, base_offset } => format!("{:?} = addr_of(base{})", dst, base_offset),
+        IrInstruction::LoadIndexedPtr { dst, base, index, elem_size } => {
+            format!("{:?} = load [*{:?}, {:?}*{}]", dst, base, index, elem_size)
+        }
+        IrInstruction::StoreIndexedPtr { base, index, src, elem_size } => {
+            format!("store [*{:?}, {:?}*{}], {:?}", base, index, elem_size, src)
         }
         IrInstruction::BinaryOp { dst, left, op, right } => format!("{:?} = {:?} {:?} {:?}", dst, left, op, right),
         IrInstruction::Call { dst, func, args } => {
