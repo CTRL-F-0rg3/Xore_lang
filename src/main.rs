@@ -7,6 +7,7 @@ mod lexer;
 mod link;
 mod lowering;
 mod module;
+mod numlit;
 mod optimize;
 mod parser;
 mod regalloc;

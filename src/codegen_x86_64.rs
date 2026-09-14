@@ -394,7 +394,28 @@ impl X86_64CodeGen {
                 let result_reg = if op == IrBinOp::Div { "%rax" } else { "%rdx" };
                 self.write_home(alloc, locals_bytes, dst, result_reg);
             }
-            IrBinOp::Eq | IrBinOp::Neq | IrBinOp::Lt | IrBinOp::Gt | IrBinOp::Le | IrBinOp::Ge => {
+            IrBinOp::DivU | IrBinOp::ModU => {
+                // Jak wyżej, ale bez znaku: zamiast `cqto` (rozszerzenie ze
+                // znakiem rax->rdx:rax) zerujemy rdx (rozszerzenie bez
+                // znaku), i używamy `divq` zamiast `idivq`.
+                let r = self.read(alloc, locals_bytes, right, SCRATCH2);
+                let moved_r = if r == "%rax" || r == "%rdx" {
+                    writeln!(self.out, "    movq {}, {}", r, SCRATCH2).unwrap();
+                    SCRATCH2.to_string()
+                } else {
+                    r
+                };
+                let l = self.read(alloc, locals_bytes, left, "%rax");
+                if l != "%rax" {
+                    writeln!(self.out, "    movq {}, %rax", l).unwrap();
+                }
+                writeln!(self.out, "    xorq %rdx, %rdx").unwrap();
+                writeln!(self.out, "    divq {}", moved_r).unwrap();
+                let result_reg = if op == IrBinOp::DivU { "%rax" } else { "%rdx" };
+                self.write_home(alloc, locals_bytes, dst, result_reg);
+            }
+            IrBinOp::Eq | IrBinOp::Neq | IrBinOp::Lt | IrBinOp::Gt | IrBinOp::Le | IrBinOp::Ge
+            | IrBinOp::LtU | IrBinOp::GtU | IrBinOp::LeU | IrBinOp::GeU => {
                 let l = self.read(alloc, locals_bytes, left, SCRATCH1);
                 let l_reg = if l == SCRATCH1 { SCRATCH1.to_string() } else {
                     writeln!(self.out, "    movq {}, {}", l, SCRATCH1).unwrap();
@@ -409,6 +430,14 @@ impl X86_64CodeGen {
                     IrBinOp::Gt => "setg",
                     IrBinOp::Le => "setle",
                     IrBinOp::Ge => "setge",
+                    // Warianty bez znaku: `setb`/`seta`/`setbe`/`setae`
+                    // (below/above) zamiast `setl`/`setg` (less/greater) -
+                    // patrzą na flagę CF zamiast SF^OF, więc dają poprawny
+                    // wynik dla wartości z ustawionym najstarszym bitem.
+                    IrBinOp::LtU => "setb",
+                    IrBinOp::GtU => "seta",
+                    IrBinOp::LeU => "setbe",
+                    IrBinOp::GeU => "setae",
                     _ => unreachable!(),
                 };
                 writeln!(self.out, "    {} {}", setcc, Self::byte_of(SCRATCH1)).unwrap();

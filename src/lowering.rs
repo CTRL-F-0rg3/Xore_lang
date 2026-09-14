@@ -21,25 +21,35 @@ pub struct Lowering {
     /// musi wiedzieć, że trzeba adresować PRZEZ tę wartość (`LoadIndexedPtr`),
     /// a nie traktować ją jak zwykłą liczbę. Resetowana na starcie każdej funkcji.
     ptr_array_params: std::collections::HashSet<String>,
+    /// Typ każdej zmiennej lokalnej/parametru w BIEŻĄCEJ funkcji (jawna
+    /// adnotacja z `let`, albo wywnioskowany). Potrzebne, żeby wiedzieć,
+    /// czy operacja binarna jest na `u32`/`u64` (wymaga wariantu IR bez
+    /// znaku - patrz `IrBinOp::*U`) czy na typie ze znakiem. Resetowana na
+    /// starcie każdej funkcji.
+    ///
+    /// UWAGA architektoniczna: to jest niezależne, uproszczone
+    /// przybliżenie type-checkingu, wykonane osobno wewnątrz lowering (bo
+    /// `checker.rs` nie zostawia żadnej adnotacji na AST, z której lowering
+    /// mogłoby skorzystać). To duplikacja logiki - docelowo `checker.rs`
+    /// powinien produkować otypowane AST/IR, które lowering by tylko
+    /// konsumowało, zamiast zgadywać typy drugi raz. Zostawione jako
+    /// świadomy dług techniczny (patrz README), bo pełne rozwiązanie
+    /// (przeciągnięcie typów przez całe IR - w tym float) to dużo większa
+    /// zmiana niż zakres tej rundy.
+    var_types: HashMap<String, Type>,
+    /// Typ zwracany każdej funkcji w programie (z `FnDef`/`FnDecl`),
+    /// zebrany raz na starcie `lower_program` - potrzebne do wnioskowania
+    /// typu wyniku wywołania (`Expr::Call`).
+    fn_return_types: HashMap<String, Type>,
     stack_offset: i32,
     next_label_id: u32,
 }
 
-/// Parsuje literał całkowity Xore (dziesiętny, `0x`, `0b`, `0o`, z `_` jako
-/// separatorem cyfr) na `i64`. Wydzielone jako wolna funkcja, bo potrzebne
-/// jest zarówno przy `LoadImm`, jak i przy stałych indeksach tablic
-/// (`arr[2]` - patrz `Expr::Index` niżej).
+/// Parsuje literał całkowity (patrz `crate::numlit`) i zwraca samą wartość -
+/// wygodny skrót dla miejsc w tym pliku, które potrzebują tylko `i64`
+/// (stałe indeksy tablic), nie pełnego typu.
 fn parse_int_literal(s: &str) -> i64 {
-    let clean: String = s.chars().filter(|&c| c != '_').collect();
-    if let Some(rest) = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")) {
-        i64::from_str_radix(rest, 16).unwrap_or(0)
-    } else if let Some(rest) = clean.strip_prefix("0b").or_else(|| clean.strip_prefix("0B")) {
-        i64::from_str_radix(rest, 2).unwrap_or(0)
-    } else if let Some(rest) = clean.strip_prefix("0o").or_else(|| clean.strip_prefix("0O")) {
-        i64::from_str_radix(rest, 8).unwrap_or(0)
-    } else {
-        clean.parse().unwrap_or(0)
-    }
+    crate::numlit::parse_int_literal(s).bits
 }
 
 impl Lowering {
@@ -50,12 +60,54 @@ impl Lowering {
             var_map: HashMap::new(),
             array_map: HashMap::new(),
             ptr_array_params: std::collections::HashSet::new(),
+            var_types: HashMap::new(),
+            fn_return_types: HashMap::new(),
             stack_offset: 0,
             next_label_id: 0,
         }
     }
 
+    /// Wnioskuje (przybliżony) typ wyrażenia - patrz komentarz przy
+    /// `var_types` odnośnie tego, dlaczego to osobna, uproszczona kopia
+    /// tego, co już policzył `checker.rs`.
+    fn infer_expr_type(&self, expr: &Expr) -> Type {
+        match expr {
+            Expr::Literal(Literal::Int(s)) => {
+                crate::numlit::infer_int_type(&crate::numlit::parse_int_literal(s))
+            }
+            Expr::Literal(Literal::Bool(_)) => Type::Bool,
+            Expr::Literal(Literal::Float(_)) => Type::F64,
+            Expr::Literal(Literal::String(_)) => Type::Custom("String".to_string()),
+            Expr::Literal(Literal::None) => Type::Unknown,
+            Expr::Variable(name) => self.var_types.get(name).cloned().unwrap_or(Type::Unknown),
+            Expr::BinaryOp { left, op, .. } => match op {
+                BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Type::Bool,
+                _ => self.infer_expr_type(left),
+            },
+            Expr::Call { callee, .. } => {
+                if let Expr::Variable(name) = callee.as_ref() {
+                    self.fn_return_types.get(name).cloned().unwrap_or(Type::Unknown)
+                } else {
+                    Type::Unknown
+                }
+            }
+            _ => Type::Unknown,
+        }
+    }
+
     pub fn lower_program(&mut self, program: &Program) -> Result<IrProgram, LoweringError> {
+        // Zbierz typy zwracane wszystkich funkcji naprzód, żeby wywołania
+        // "w przód" (i wzajemnie rekurencyjne) też miały poprawnie
+        // wywnioskowany typ wyniku.
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::FnDef { name, return_type, .. } | Stmt::FnDecl { name, return_type, .. } => {
+                    self.fn_return_types.insert(name.clone(), return_type.clone().unwrap_or(Type::Unknown));
+                }
+                _ => {}
+            }
+        }
+
         for stmt in &program.stmts {
             self.lower_stmt(stmt)?;
         }
@@ -146,6 +198,7 @@ impl Lowering {
                 // nie używały tej samej nazwy tablicy w dwóch funkcjach).
                 self.array_map.clear();
                 self.ptr_array_params.clear();
+                self.var_types.clear();
                 self.stack_offset = 0;
 
                 self.emit(IrInstruction::Label(format!("func_{}", name)));
@@ -157,6 +210,7 @@ impl Lowering {
                     self.stack_offset -= 8;
                     let loc = Location::StackSlot(self.stack_offset);
                     self.var_map.insert(param_name.clone(), loc.clone());
+                    self.var_types.insert(param_name.clone(), param_type.clone());
 
                     if let Some(func) = &mut self.current_func {
                         func.locals.push((param_name.clone(), param_type.clone()));
@@ -193,7 +247,7 @@ impl Lowering {
                     }
                 }
             }
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let { name, typ, value, .. } => {
                 // Tablica ma osobną ścieżkę: potrzebuje N kolejnych slotów
                 // (nie jednego) i wpisu w `array_map`, żeby `Expr::Index`
                 // później wiedział, gdzie jej szukać. Obsługiwane jest dziś
@@ -254,6 +308,12 @@ impl Lowering {
                 self.stack_offset -= 8;
                 let loc = Location::StackSlot(self.stack_offset);
                 self.var_map.insert(name.clone(), loc.clone());
+                // Zapamiętaj typ zmiennej (jawna adnotacja albo
+                // wywnioskowany) - potrzebne przy operacjach binarnych, żeby
+                // wiedzieć, czy użyć wariantu IR ze znakiem czy bez (patrz
+                // `var_types` i `IrBinOp::*U`).
+                let var_ty = typ.clone().unwrap_or_else(|| self.infer_expr_type(value));
+                self.var_types.insert(name.clone(), var_ty);
 
                 if let Some(func) = &mut self.current_func {
                     func.locals.push((name.clone(), Type::Unknown));
@@ -326,18 +386,25 @@ impl Lowering {
                     }
                 } else {
                     let dst = self.new_temp();
+                    // Porównania/dzielenie muszą użyć wariantu IR bez znaku,
+                    // gdy operandy są `u32`/`u64` - inaczej np. `4000000000_u32
+                    // < 10` (gdzie lewa wartość ma ustawiony najstarszy bit)
+                    // dałoby błędny wynik przy zwykłym porównaniu ze znakiem.
+                    // Sprawdzamy tylko `left` - checker już wymusił, że oba
+                    // operandy mają ten sam typ.
+                    let unsigned = crate::numlit::is_unsigned(&self.infer_expr_type(left));
                     let ir_op = match op {
                         BinOp::Add => IrBinOp::Add,
                         BinOp::Sub => IrBinOp::Sub,
                         BinOp::Mul => IrBinOp::Mul,
-                        BinOp::Div => IrBinOp::Div,
-                        BinOp::Mod => IrBinOp::Mod,
+                        BinOp::Div => if unsigned { IrBinOp::DivU } else { IrBinOp::Div },
+                        BinOp::Mod => if unsigned { IrBinOp::ModU } else { IrBinOp::Mod },
                         BinOp::Eq => IrBinOp::Eq,
                         BinOp::Neq => IrBinOp::Neq,
-                        BinOp::Lt => IrBinOp::Lt,
-                        BinOp::Gt => IrBinOp::Gt,
-                        BinOp::Le => IrBinOp::Le,
-                        BinOp::Ge => IrBinOp::Ge,
+                        BinOp::Lt => if unsigned { IrBinOp::LtU } else { IrBinOp::Lt },
+                        BinOp::Gt => if unsigned { IrBinOp::GtU } else { IrBinOp::Gt },
+                        BinOp::Le => if unsigned { IrBinOp::LeU } else { IrBinOp::Le },
+                        BinOp::Ge => if unsigned { IrBinOp::GeU } else { IrBinOp::Ge },
                         _ => return Err(LoweringError { message: format!("Unsupported operator: {:?}", op) }),
                     };
                     self.emit(IrInstruction::BinaryOp { dst, left: left_temp, op: ir_op, right: right_temp });

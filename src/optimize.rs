@@ -100,6 +100,25 @@ fn fold_binop(op: IrBinOp, l: i64, r: i64) -> Option<i64> {
         IrBinOp::Gt => (l > r) as i64,
         IrBinOp::Le => (l <= r) as i64,
         IrBinOp::Ge => (l >= r) as i64,
+        // Warianty bez znaku: reinterpretujemy oba operandy jako u64 przed
+        // porównaniem/dzieleniem - to jedyna różnica względem wariantów ze
+        // znakiem wyżej.
+        IrBinOp::DivU => {
+            if r == 0 {
+                return None;
+            }
+            (l as u64).wrapping_div(r as u64) as i64
+        }
+        IrBinOp::ModU => {
+            if r == 0 {
+                return None;
+            }
+            (l as u64).wrapping_rem(r as u64) as i64
+        }
+        IrBinOp::LtU => ((l as u64) < (r as u64)) as i64,
+        IrBinOp::GtU => ((l as u64) > (r as u64)) as i64,
+        IrBinOp::LeU => ((l as u64) <= (r as u64)) as i64,
+        IrBinOp::GeU => ((l as u64) >= (r as u64)) as i64,
         IrBinOp::And => ((l != 0) && (r != 0)) as i64,
         IrBinOp::Or => ((l != 0) || (r != 0)) as i64,
     })

@@ -201,7 +201,20 @@ impl<'src> Lexer<'src> {
                     self.advance(); // '0'
                     self.advance(); // x/b/o
                     while let Some(ch) = self.peek() {
-                        if ch == '_' || is_digit(ch) {
+                        if ch == '_' {
+                            // '_' jest separatorem cyfr TYLKO gdy po nim idzie
+                            // kolejna cyfra - inaczej to początek sufiksu typu
+                            // (np. `0x1A_i64`) i musi zostać nietknięty dla
+                            // bloku niżej. Bez tego rozróżnienia `_i64` był
+                            // po cichu połykany razem z liczbą i lexowany
+                            // jako osobny, bezsensowny identyfikator - sufiksy
+                            // typu w ogóle się nie parsowały (błąd wykryty
+                            // przy testowaniu typowania i64/u32/u64).
+                            match self.peek_next() {
+                                Some(next) if is_digit(next) => { self.advance(); }
+                                _ => break,
+                            }
+                        } else if is_digit(ch) {
                             self.advance();
                         } else {
                             break;
@@ -217,7 +230,16 @@ impl<'src> Lexer<'src> {
         }
 
         while let Some(ch) = self.peek() {
-            if ch == '_' || ch.is_ascii_digit() {
+            if ch == '_' {
+                // Jak wyżej: `_` łączy tylko dwie cyfry (separator grup, np.
+                // `1_000_000`) - jeśli po nim NIE ma cyfry, to początek
+                // sufiksu typu (`100_i64`, `5_u32`) i zostawiamy go dla
+                // bloku niżej.
+                match self.peek_next() {
+                    Some(next) if next.is_ascii_digit() => { self.advance(); }
+                    _ => break,
+                }
+            } else if ch.is_ascii_digit() {
                 self.advance();
             } else if ch == '.' && !is_float {
                 if let Some(next) = self.peek_next() {

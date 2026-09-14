@@ -361,6 +361,21 @@ impl RiscV64CodeGen {
             IrBinOp::Mul => { writeln!(self.out, "    mul {}, {}, {}", work, l, r).unwrap(); }
             IrBinOp::Div => { writeln!(self.out, "    div {}, {}, {}", work, l, r).unwrap(); }
             IrBinOp::Mod => { writeln!(self.out, "    rem {}, {}, {}", work, l, r).unwrap(); }
+            // Warianty bez znaku: RISC-V ma osobne instrukcje `divu`/`remu`
+            // i `sltu` (zamiast `div`/`rem`/`slt`) - żadnych sztuczek z
+            // flagami jak na x86, po prostu inna instrukcja.
+            IrBinOp::DivU => { writeln!(self.out, "    divu {}, {}, {}", work, l, r).unwrap(); }
+            IrBinOp::ModU => { writeln!(self.out, "    remu {}, {}, {}", work, l, r).unwrap(); }
+            IrBinOp::LtU => { writeln!(self.out, "    sltu {}, {}, {}", work, l, r).unwrap(); }
+            IrBinOp::GtU => { writeln!(self.out, "    sltu {}, {}, {}", work, r, l).unwrap(); }
+            IrBinOp::LeU => {
+                writeln!(self.out, "    sltu {}, {}, {}", work, r, l).unwrap();
+                writeln!(self.out, "    xori {}, {}, 1", work, work).unwrap();
+            }
+            IrBinOp::GeU => {
+                writeln!(self.out, "    sltu {}, {}, {}", work, l, r).unwrap();
+                writeln!(self.out, "    xori {}, {}, 1", work, work).unwrap();
+            }
             IrBinOp::Eq => {
                 writeln!(self.out, "    sub {}, {}, {}", work, l, r).unwrap();
                 writeln!(self.out, "    seqz {}, {}", work, work).unwrap();

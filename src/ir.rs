@@ -61,6 +61,11 @@ pub enum IrInstruction {
 pub enum IrBinOp {
     Add, Sub, Mul, Div, Mod,
     Eq, Neq, Lt, Gt, Le, Ge,
+    /// Warianty bez znaku (dla `u32`/`u64`) - dają inny wynik niż warianty
+    /// ze znakiem dla wartości z ustawionym najstarszym bitem (np.
+    /// porównanie czy dzielenie liczb bliskich `u32::MAX`). Wybierane w
+    /// `lowering.rs` na podstawie wywnioskowanego typu operandów.
+    DivU, ModU, LtU, GtU, LeU, GeU,
     And, Or,
 }
 

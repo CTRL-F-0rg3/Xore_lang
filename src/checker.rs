@@ -143,9 +143,13 @@ impl SemanticChecker {
         match expr {
             Expr::Literal(lit) => match lit {
                 Literal::Int(s) => {
-                    if s.contains("_u32") || s.contains("u32") { Type::U32 }
-                    else if s.contains("_i64") || s.contains("i64") { Type::I64 }
-                    else { Type::I32 }
+                    // Poprzednio: fragile heurystyka na podstawie
+                    // podciągów tekstu (i w ogóle nie rozróżniała i32 od
+                    // wartości spoza jego zakresu - `9999999999999` bez
+                    // sufiksu zawsze dostawało I32, mimo że się w nim nie
+                    // mieści). Teraz: wspólny z `lowering.rs` parser,
+                    // wnioskowanie na podstawie realnej wartości + sufiksu.
+                    crate::numlit::infer_int_type(&crate::numlit::parse_int_literal(s))
                 }
                 Literal::Float(_) => Type::F64,
                 Literal::String(_) => Type::Custom("String".to_string()),
