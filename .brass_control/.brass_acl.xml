@@ -1,0 +1,7 @@
+<brass_acl>
+    <rules>
+        <user>Kacper</user>
+        <path_pattern>*</path_pattern>
+        <access>ReadWrite</access>
+    </rules>
+</brass_acl>
