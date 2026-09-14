@@ -75,23 +75,32 @@ There are no block comments (`/* ... */`).
 
 | Type | Description | Status |
 |---|---|---|
-| `i32`, `i64` | signed integers | ✅ fully working |
-| `u32`, `u64` | unsigned integers | ⚠️ behave like `i32`/`i64` — see below |
+| `i32`, `i64` | signed integers | ✅ fully working, including correct type inference for large literals and suffixes (`100_i64`) |
+| `u32`, `u64` | unsigned integers | ✅ comparisons and division/modulo are correctly unsigned — see below |
 | `f32`, `f64` | floating point | ❌ do not work correctly (see below) |
 | `bool` | `True` / `False` | ✅ working |
 | `Foo` (any name) | nominal type (future structs) | ❌ no struct definitions exist — unusable |
-| `[T; N]` (arrays) | fixed-size arrays | ❌ parses but doesn't work at runtime |
+| `[T; N]` (arrays) | fixed-size arrays | ✅ working (local, copyable, passable to functions) — see [Arrays](#arrays) |
 
-**Why `u32`/`u64` and `f32`/`f64` don't fully work:** the internal IR does
-not carry the type of an operation — `a + b` looks identical whether `a`/`b`
-are ints or floats. Division/modulo always generate **signed** code, so for
-`u32`/`u64` values above half the range the result will be wrong. Floating
-point arithmetic isn't generated correctly at all — `f64`/`f32` literals are
-currently stored as raw bit patterns in an integer register (the compiler
-leaves a comment about this in the generated assembly), so any `+`/`*` on
-them will produce nonsense. **Recommendation: stick to `i32`/`i64`/`bool`
-until this is fixed in the compiler** (see the roadmap discussion with the
-assistant).
+**`u32`/`u64`:** comparisons (`< > <= >=`) and division/modulo correctly
+use unsigned instructions (`seta`/`setb`/`divq` on x86_64,
+`sltu`/`divu`/`remu` on RISC-V64) — verified with a test right at the
+boundary (`4000000000_u32 > 10_u32` correctly evaluates to `True`, even
+though that value would be negative as an `i32`). **One remaining
+limitation:** arithmetic (`+ - *`) on `u32`/`i32` doesn't wrap around at
+the 32-bit boundary — we always operate on full 64-bit registers
+regardless of the declared type. This only matters for *intermediate*
+values that actually exceed the 32-bit range during computation (rare in
+typical programs) — comparisons/division on an already-computed value are
+correct regardless of this limitation.
+
+**Why `f32`/`f64` don't work:** the internal IR doesn't carry information
+about whether an arithmetic operation (`+ - *`) is on an int or a float —
+`a + b` looks identical either way. `f64`/`f32` literals are currently
+stored as raw bit patterns in an integer register (the compiler leaves a
+comment about this in the generated assembly), so any `+`/`*`/`<` on them
+will produce nonsense. **Recommendation: stick to
+`i32`/`i64`/`u32`/`u64`/`bool` until floats are fixed in the compiler.**
 
 ## Literals
 
@@ -100,6 +109,9 @@ assistant).
 0x1A        // hex literal
 0b1010      // binary literal
 0o17        // octal literal
+100_i64     // explicit type suffix -> i64
+5_u32       // explicit type suffix -> u32
+9999999999999   // no suffix, doesn't fit i32 -> inferred as i64
 3.14        // FloatLiteral — see limitations above
 "text"      // StringLiteral
 r"C:\path"  // RawStringLiteral (no \ escaping)
@@ -113,6 +125,14 @@ None        // "no value" — type Unknown
 An earlier version of the lexer/lowering silently mis-parsed them as `0`;
 this has been fixed and verified with a test comparing against Python's
 evaluation of the same expression.
+
+✅ **Type suffixes (`_i32`, `_i64`, `_u32`, `_u64`) work correctly.** An
+earlier version didn't even parse them (the lexer swallowed the `_` as a
+digit separator, leaving a stray, meaningless identifier token behind). A
+literal with no suffix and no explicit `let` type annotation is inferred
+as `i32` if its value fits, otherwise `i64` — unsigned types are never
+inferred from magnitude alone, only from an explicit `_u32`/`_u64` suffix
+or a `let` type annotation.
 
 ## Variables (`let`)
 

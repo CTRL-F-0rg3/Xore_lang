@@ -74,23 +74,33 @@ Nie ma komentarzy blokowych (`/* ... */`).
 
 | Typ | Opis | Status |
 |---|---|---|
-| `i32`, `i64` | liczby całkowite ze znakiem | ✅ w pełni działa |
-| `u32`, `u64` | liczby całkowite bez znaku | ⚠️ działają jak `i32`/`i64` — patrz niżej |
+| `i32`, `i64` | liczby całkowite ze znakiem | ✅ w pełni działa, włącznie z poprawnym wnioskowaniem typu dla dużych literałów i sufiksów (`100_i64`) |
+| `u32`, `u64` | liczby całkowite bez znaku | ✅ porównania i dzielenie/modulo poprawnie bez znaku — patrz niżej |
 | `f32`, `f64` | liczby zmiennoprzecinkowe | ❌ nie działają poprawnie (patrz niżej) |
 | `bool` | `True` / `False` | ✅ działa |
 | `Foo` (dowolna nazwa) | typ nominalny (przyszłe struktury) | ❌ nie ma definicji struktur — nieużywalne |
-| `[T; N]` (tablice) | tablice o stałym rozmiarze | ❌ parsuje się, ale nie działa w runtime |
+| `[T; N]` (tablice) | tablice o stałym rozmiarze | ✅ działa (lokalne, kopiowanie, przekazywanie do funkcji) — patrz [Tablice](#tablice) |
 
-**Dlaczego `u32`/`u64` i `f32`/`f64` nie działają w pełni:** wewnętrzna
-reprezentacja pośrednia (IR) nie niesie informacji o typie operacji — `a + b`
-wygląda tak samo dla inta jak dla floata. Dzielenie/modulo zawsze generują
-kod **ze znakiem**, więc dla `u32`/`u64` przy wartościach powyżej połowy
-zakresu wynik będzie zły. Arytmetyka zmiennoprzecinkowa w ogóle nie jest
-generowana poprawnie — literały `f64`/`f32` są dziś zapisywane jako surowe
-bity w rejestrze całkowitym (kompilator zostawia o tym komentarz w
-wygenerowanym asemblerze), więc jakiekolwiek `+`/`*` na nich da bezsensowny
-wynik. **Rekomendacja: używaj tylko `i32`/`i64`/`bool` do czasu naprawienia
-tego w kompilatorze** (patrz sekcja "jak rozwijać" w rozmowie z asystentem).
+**`u32`/`u64`:** porównania (`< > <= >=`) i dzielenie/modulo poprawnie
+używają instrukcji bez znaku (`seta`/`setb`/`divq` na x86_64,
+`sltu`/`divu`/`remu` na RISC-V64) — sprawdzone testem na granicy zakresu
+(`4000000000_u32 > 10_u32` daje poprawne `True`, mimo że ta wartość jako
+`i32` byłaby ujemna). **Jedno pozostałe ograniczenie:** arytmetyka
+(`+ - *`) na `u32`/`i32` nie "zawija się" (wrap-around) przy przepełnieniu
+32 bitów — operujemy zawsze na pełnych 64-bitowych rejestrach niezależnie
+od deklarowanego typu. Ma to znaczenie tylko dla wartości POŚREDNICH,
+które faktycznie przekraczają zakres 32 bitów w trakcie obliczeń (rzadkie
+w typowych programach) - dla już obliczonej wartości porównania/dzielenie
+są poprawne bez względu na to ograniczenie.
+
+**Dlaczego `f32`/`f64` nie działają:** wewnętrzna reprezentacja pośrednia
+(IR) nie niesie informacji o tym, czy operacja arytmetyczna (`+ - *`)
+dotyczy inta czy floata — `a + b` wygląda identycznie dla obu. Literały
+`f64`/`f32` są dziś zapisywane jako surowe bity w rejestrze całkowitym
+(kompilator zostawia o tym komentarz w wygenerowanym asemblerze), więc
+jakiekolwiek `+`/`*`/`<` na nich da bezsensowny wynik. **Rekomendacja:
+używaj tylko `i32`/`i64`/`u32`/`u64`/`bool` do czasu naprawienia floatów w
+kompilatorze.**
 
 ## Literały
 
@@ -99,6 +109,9 @@ tego w kompilatorze** (patrz sekcja "jak rozwijać" w rozmowie z asystentem).
 0x1A        // literał szesnastkowy
 0b1010      // literał binarny
 0o17        // literał ósemkowy
+100_i64     // jawny sufiks typu -> i64
+5_u32       // jawny sufiks typu -> u32
+9999999999999   // bez sufiksu, nie mieści się w i32 -> wywnioskowane jako i64
 3.14        // FloatLiteral — patrz ograniczenia wyżej
 "tekst"     // StringLiteral
 r"C:\path"  // RawStringLiteral (bez interpretacji \)
@@ -112,6 +125,14 @@ None        // "brak wartości" — typ Unknown
 działają poprawnie.** Wcześniejsza wersja lexera/lowering po cichu
 zamieniała je na `0` — naprawione i zweryfikowane testem porównującym wynik
 z obliczeniem w Pythonie.
+
+✅ **Sufiksy typu (`_i32`, `_i64`, `_u32`, `_u64`) działają poprawnie.**
+Wcześniejsza wersja w ogóle ich nie parsowała (lekser łapczywie zjadał `_`
+jako separator cyfr, zostawiając osobny, bezsensowny token identyfikatora).
+Literał bez sufiksu i bez jawnej adnotacji typu w `let` jest wnioskowany
+jako `i32`, jeśli wartość się mieści, inaczej jako `i64` — typy bez znaku
+nigdy nie są wnioskowane z samej wartości, tylko z jawnego sufiksu
+`_u32`/`_u64` albo adnotacji typu w `let`.
 
 ## Zmienne (`let`)
 
