@@ -66,6 +66,12 @@ pub enum IrBinOp {
     /// porównanie czy dzielenie liczb bliskich `u32::MAX`). Wybierane w
     /// `lowering.rs` na podstawie wywnioskowanego typu operandów.
     DivU, ModU, LtU, GtU, LeU, GeU,
+    /// Warianty zmiennoprzecinkowe (`f64`) - operują na wartościach w
+    /// rejestrach xmm/f, nie w rejestrach ogólnego przeznaczenia. Wynik
+    /// porównań (`F*`) jest mimo to zwykłym intem/boolem (0/1) - tylko
+    /// operandy WEJŚCIOWE są float, nie wynik. Wybierane w `lowering.rs`
+    /// na podstawie wywnioskowanego typu operandów (patrz `float_temps`).
+    FAdd, FSub, FMul, FDiv, FEq, FNeq, FLt, FGt, FLe, FGe,
     And, Or,
 }
 
@@ -77,6 +83,16 @@ pub struct IrFunction {
     pub locals: Vec<(String, Type)>,
     pub instructions: Vec<IrInstruction>,
     pub next_temp: u32,
+    /// Zbiór tempów, których wartość jest zmiennoprzecinkowa (`f64`) - a
+    /// więc musi być ładowana/zapisywana przez rejestry xmm/f (SSE2/RISC-V D),
+    /// a nie rejestry ogólnego przeznaczenia, oraz przekazywana w innej
+    /// klasie rejestrów argumentów przy wywołaniach. Wypełniane przez
+    /// `lowering.rs` (patrz `Lowering::infer_expr_type`); alokator
+    /// rejestrów (`regalloc.rs`) traktuje te tempy specjalnie - zawsze
+    /// rezyduje w pamięci, nigdy w puli rejestrów ogólnego przeznaczenia
+    /// (na x86_64 SysV ABI nie ma żadnych callee-saved rejestrów xmm w ogóle,
+    /// więc "zwykła" alokacja jak dla intów by tu nie zadziałała poprawnie).
+    pub float_temps: std::collections::HashSet<Temp>,
 }
 
 impl IrFunction {

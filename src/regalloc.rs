@@ -118,6 +118,18 @@ pub fn allocate(func: &IrFunction, num_registers: usize) -> RegAllocResult {
     let mut num_spill_slots = 0usize;
 
     for iv in &intervals {
+        // Tempy zmiennoprzecinkowe NIGDY nie trafiają do puli rejestrów
+        // ogólnego przeznaczenia - zawsze rezydują w pamięci (patrz komentarz
+        // przy `IrFunction::float_temps`: x86_64 SysV nie ma callee-saved
+        // rejestrów xmm, więc nasza strategia "tylko callee-saved" nie da
+        // się zastosować do floatów; upraszczamy, zamiast budować drugi,
+        // równoległy alokator dla osobnej klasy rejestrów).
+        if func.float_temps.contains(&iv.temp) {
+            home.insert(iv.temp, Home::Spill(num_spill_slots));
+            num_spill_slots += 1;
+            continue;
+        }
+
         // Zwolnij rejestry interwałów, które już się skończyły.
         active.retain(|(end, t, reg)| {
             if *end < iv.start {

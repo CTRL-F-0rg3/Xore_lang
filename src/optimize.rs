@@ -78,6 +78,15 @@ fn constant_fold(func: &mut IrFunction) -> bool {
 }
 
 fn fold_binop(op: IrBinOp, l: i64, r: i64) -> Option<i64> {
+    // Warianty float (`F*`) celowo nie są tu składane: `consts` operuje na
+    // `i64` (bity), a stałe składanie floatów wymagałoby osobnej ścieżki
+    // interpretującej te bity jako `f64` - nieobsłużone w tej rundzie
+    // (bezpiecznie: po prostu nie optymalizujemy, nie liczymy źle).
+    if matches!(op, IrBinOp::FAdd | IrBinOp::FSub | IrBinOp::FMul | IrBinOp::FDiv
+        | IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe)
+    {
+        return None;
+    }
     Some(match op {
         IrBinOp::Add => l.wrapping_add(r),
         IrBinOp::Sub => l.wrapping_sub(r),
@@ -121,6 +130,12 @@ fn fold_binop(op: IrBinOp, l: i64, r: i64) -> Option<i64> {
         IrBinOp::GeU => ((l as u64) >= (r as u64)) as i64,
         IrBinOp::And => ((l != 0) && (r != 0)) as i64,
         IrBinOp::Or => ((l != 0) || (r != 0)) as i64,
+        // Nieosiągalne - odfiltrowane wczesnym `return None` na górze
+        // funkcji, ale `match` i tak musi być wyczerpujący.
+        IrBinOp::FAdd | IrBinOp::FSub | IrBinOp::FMul | IrBinOp::FDiv
+        | IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe => {
+            unreachable!("warianty float odfiltrowane wcześniej")
+        }
     })
 }
 

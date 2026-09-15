@@ -133,6 +133,21 @@ impl Lowering {
         }
     }
 
+    /// Oznacza temp jako zmiennoprzecinkowy (`f64`) - patrz komentarz przy
+    /// `IrFunction::float_temps`. Wywoływane w każdym miejscu, gdzie
+    /// wiadomo, że wartość danego tempa jest floatem (literał float,
+    /// odczyt zmiennej typu f64, wynik arytmetyki float, parametr/wynik
+    /// wywołania typu f64).
+    fn mark_float(&mut self, t: Temp) {
+        if let Some(func) = &mut self.current_func {
+            func.float_temps.insert(t);
+        }
+    }
+
+    fn is_float_type(ty: &Type) -> bool {
+        matches!(ty, Type::F64)
+    }
+
     fn new_label(&mut self) -> String {
         let label = format!("L{}", self.next_label_id);
         self.next_label_id += 1;
@@ -187,6 +202,7 @@ impl Lowering {
                                          locals: Vec::new(),
                                          instructions: Vec::new(),
                                          next_temp: 0,
+                                         float_temps: std::collections::HashSet::new(),
                 });
                 self.var_map.clear();
                 // `array_map`/`ptr_array_params` też muszą być czyszczone na
@@ -206,7 +222,24 @@ impl Lowering {
                 // Powiąż parametry wejściowe (rejestry wg konwencji wywołań) z ich
                 // slotami na stosie. To był brakujący krok - bez niego LoadMem na
                 // parametrze czytałby niezainicjalizowaną pamięć.
-                for (i, (param_name, param_type)) in params.iter().enumerate() {
+                //
+                // Parametry float i int mają OSOBNE numeracje rejestrów w
+                // konwencji wywołań (np. `fn f(a: i32, b: f64, c: i32)`
+                // przekazuje `a` w rdi, `b` w xmm0, `c` w rsi - NIE w rdx) -
+                // stąd dwa niezależne liczniki zamiast jednego `i`.
+                let mut int_param_idx: usize = 0;
+                let mut float_param_idx: usize = 0;
+                for (param_name, param_type) in params.iter() {
+                    if matches!(param_type, Type::F32) {
+                        return Err(LoweringError {
+                            message: format!(
+                                "Funkcja '{}', parametr '{}': f32 nie jest jeszcze obsługiwane (tylko f64) - użyj f64",
+                                name, param_name
+                            ),
+                        });
+                    }
+                    let is_float = Self::is_float_type(param_type);
+
                     self.stack_offset -= 8;
                     let loc = Location::StackSlot(self.stack_offset);
                     self.var_map.insert(param_name.clone(), loc.clone());
@@ -217,7 +250,14 @@ impl Lowering {
                     }
 
                     let ptemp = self.new_temp();
-                    self.emit(IrInstruction::LoadParam { dst: ptemp, index: i });
+                    let class_index = if is_float { float_param_idx } else { int_param_idx };
+                    self.emit(IrInstruction::LoadParam { dst: ptemp, index: class_index });
+                    if is_float {
+                        self.mark_float(ptemp);
+                        float_param_idx += 1;
+                    } else {
+                        int_param_idx += 1;
+                    }
                     self.emit(IrInstruction::StoreMem { dst: loc, src: ptemp });
 
                     // Parametr tablicowy "rozpada się" do wskaźnika (adresu
@@ -255,6 +295,22 @@ impl Lowering {
                 // całej tablicy z innej zmiennej albo zwrócenie tablicy z
                 // funkcji nie jest jeszcze wspierane (patrz README).
                 if let Expr::ArrayInit { elements, .. } = value.as_ref() {
+                    // Tablice elementów zmiennoprzecinkowych nie są jeszcze
+                    // obsługiwane: `LoadIndexed`/`StoreIndexed` (indeksowanie
+                    // dynamiczne) ładują/zapisują przez rejestry ogólnego
+                    // przeznaczenia, nie xmm/f - dałoby to cicho zły wynik
+                    // zamiast błędu. Wolimy głośno odmówić.
+                    if let Some(first) = elements.first() {
+                        let elem_ty = self.infer_expr_type(first);
+                        if matches!(elem_ty, Type::F64 | Type::F32) {
+                            return Err(LoweringError {
+                                message: format!(
+                                    "Tablica '{}': tablice elementów zmiennoprzecinkowych nie są jeszcze obsługiwane",
+                                    name
+                                ),
+                            });
+                        }
+                    }
                     let mut elem0_offset = 0;
                     for (i, elem) in elements.iter().enumerate() {
                         self.stack_offset -= 8;
@@ -313,6 +369,14 @@ impl Lowering {
                 // wiedzieć, czy użyć wariantu IR ze znakiem czy bez (patrz
                 // `var_types` i `IrBinOp::*U`).
                 let var_ty = typ.clone().unwrap_or_else(|| self.infer_expr_type(value));
+                if matches!(var_ty, Type::F32) {
+                    return Err(LoweringError {
+                        message: format!(
+                            "Zmienna '{}': f32 nie jest jeszcze obsługiwane (tylko f64) - użyj f64",
+                            name
+                        ),
+                    });
+                }
                 self.var_types.insert(name.clone(), var_ty);
 
                 if let Some(func) = &mut self.current_func {
@@ -339,7 +403,10 @@ impl Lowering {
                 let dst = self.new_temp();
                 let value = match lit {
                     Literal::Int(s) => Operand::ImmInt(parse_int_literal(s)),
-                    Literal::Float(s) => Operand::ImmFloat(s.parse().unwrap_or(0.0)),
+                    Literal::Float(s) => {
+                        self.mark_float(dst);
+                        Operand::ImmFloat(s.parse().unwrap_or(0.0))
+                    }
                     Literal::String(s) => Operand::ImmString(s.clone()),
                     _ => Operand::ImmInt(0),
                 };
@@ -349,6 +416,9 @@ impl Lowering {
             Expr::Variable(name) => {
                 if let Some(loc) = self.var_map.get(name).cloned() {
                     let dst = self.new_temp();
+                    if matches!(self.var_types.get(name), Some(Type::F64)) {
+                        self.mark_float(dst);
+                    }
                     self.emit(IrInstruction::LoadMem { dst, src: loc });
                     Ok(dst)
                 } else if let Some(&(elem0_offset, _len)) = self.array_map.get(name) {
@@ -386,27 +456,56 @@ impl Lowering {
                     }
                 } else {
                     let dst = self.new_temp();
+                    let operand_ty = self.infer_expr_type(left);
+                    let is_float = Self::is_float_type(&operand_ty);
                     // Porównania/dzielenie muszą użyć wariantu IR bez znaku,
                     // gdy operandy są `u32`/`u64` - inaczej np. `4000000000_u32
                     // < 10` (gdzie lewa wartość ma ustawiony najstarszy bit)
                     // dałoby błędny wynik przy zwykłym porównaniu ze znakiem.
                     // Sprawdzamy tylko `left` - checker już wymusił, że oba
                     // operandy mają ten sam typ.
-                    let unsigned = crate::numlit::is_unsigned(&self.infer_expr_type(left));
-                    let ir_op = match op {
-                        BinOp::Add => IrBinOp::Add,
-                        BinOp::Sub => IrBinOp::Sub,
-                        BinOp::Mul => IrBinOp::Mul,
-                        BinOp::Div => if unsigned { IrBinOp::DivU } else { IrBinOp::Div },
-                        BinOp::Mod => if unsigned { IrBinOp::ModU } else { IrBinOp::Mod },
-                        BinOp::Eq => IrBinOp::Eq,
-                        BinOp::Neq => IrBinOp::Neq,
-                        BinOp::Lt => if unsigned { IrBinOp::LtU } else { IrBinOp::Lt },
-                        BinOp::Gt => if unsigned { IrBinOp::GtU } else { IrBinOp::Gt },
-                        BinOp::Le => if unsigned { IrBinOp::LeU } else { IrBinOp::Le },
-                        BinOp::Ge => if unsigned { IrBinOp::GeU } else { IrBinOp::Ge },
-                        _ => return Err(LoweringError { message: format!("Unsupported operator: {:?}", op) }),
+                    let unsigned = crate::numlit::is_unsigned(&operand_ty);
+                    let ir_op = if is_float {
+                        match op {
+                            BinOp::Add => IrBinOp::FAdd,
+                            BinOp::Sub => IrBinOp::FSub,
+                            BinOp::Mul => IrBinOp::FMul,
+                            BinOp::Div => IrBinOp::FDiv,
+                            BinOp::Eq => IrBinOp::FEq,
+                            BinOp::Neq => IrBinOp::FNeq,
+                            BinOp::Lt => IrBinOp::FLt,
+                            BinOp::Gt => IrBinOp::FGt,
+                            BinOp::Le => IrBinOp::FLe,
+                            BinOp::Ge => IrBinOp::FGe,
+                            BinOp::Mod => {
+                                return Err(LoweringError {
+                                    message: "Operator % nie jest obsługiwany dla f64".to_string(),
+                                })
+                            }
+                            _ => return Err(LoweringError { message: format!("Unsupported operator: {:?}", op) }),
+                        }
+                    } else {
+                        match op {
+                            BinOp::Add => IrBinOp::Add,
+                            BinOp::Sub => IrBinOp::Sub,
+                            BinOp::Mul => IrBinOp::Mul,
+                            BinOp::Div => if unsigned { IrBinOp::DivU } else { IrBinOp::Div },
+                            BinOp::Mod => if unsigned { IrBinOp::ModU } else { IrBinOp::Mod },
+                            BinOp::Eq => IrBinOp::Eq,
+                            BinOp::Neq => IrBinOp::Neq,
+                            BinOp::Lt => if unsigned { IrBinOp::LtU } else { IrBinOp::Lt },
+                            BinOp::Gt => if unsigned { IrBinOp::GtU } else { IrBinOp::Gt },
+                            BinOp::Le => if unsigned { IrBinOp::LeU } else { IrBinOp::Le },
+                            BinOp::Ge => if unsigned { IrBinOp::GeU } else { IrBinOp::Ge },
+                            _ => return Err(LoweringError { message: format!("Unsupported operator: {:?}", op) }),
+                        }
                     };
+                    // Wynik operacji arytmetycznej na floatach jest floatem;
+                    // wynik porównania (nawet na floatach) jest zwykłym
+                    // intem/boolem (0/1) - patrz komentarz przy `IrBinOp::F*`.
+                    if is_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                        self.mark_float(dst);
+                    }
                     self.emit(IrInstruction::BinaryOp { dst, left: left_temp, op: ir_op, right: right_temp });
                     Ok(dst)
                 }
@@ -475,6 +574,19 @@ impl Lowering {
                 }
 
                 let dst = self.new_temp();
+                if let Some(ret_ty) = self.fn_return_types.get(&func_name).cloned() {
+                    if matches!(ret_ty, Type::F32) {
+                        return Err(LoweringError {
+                            message: format!(
+                                "Wywołanie '{}': f32 nie jest jeszcze obsługiwane (tylko f64) - użyj f64",
+                                func_name
+                            ),
+                        });
+                    }
+                    if Self::is_float_type(&ret_ty) {
+                        self.mark_float(dst);
+                    }
+                }
                 self.emit(IrInstruction::Call { dst: Some(dst), func: func_name, args: arg_temps });
                 Ok(dst)
             }

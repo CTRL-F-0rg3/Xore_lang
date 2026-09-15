@@ -6,11 +6,9 @@
 //! wartość (%rax) są rozłączne z tą pulą, więc przekazywanie argumentów
 //! przy wywołaniu funkcji nigdy nie wymaga rozwiązywania konfliktów kolejności.
 //!
-//! Ograniczenia (świadome, udokumentowane - patrz README wygenerowane niżej
-//! w komentarzu na końcu pliku): brak natywnej arytmetyki
-//! zmiennoprzecinkowej (IR nie niesie informacji o typie operacji - to
-//! architektoniczna luka w dostarczonym `ir.rs`/`lowering.rs`, nie w tym
-//! generatorze), maksymalnie 6 argumentów całkowitych na wywołanie.
+//! Ograniczenia (świadome, udokumentowane - patrz README): maksymalnie 6
+//! argumentów całkowitych / 8 argumentów f64 na wywołanie; f32 odrzucane
+//! wprost na etapie `lowering.rs` (tylko f64 jest wspierane).
 
 use crate::ir::*;
 use crate::regalloc::{self, Home};
@@ -20,10 +18,19 @@ use std::fmt::Write as _;
 const POOL: [&str; 5] = ["%rbx", "%r12", "%r13", "%r14", "%r15"];
 const POOL_BYTE: [&str; 5] = ["%bl", "%r12b", "%r13b", "%r14b", "%r15b"];
 const ARG_REGS: [&str; 6] = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
+/// Rejestry argumentów zmiennoprzecinkowych (SysV AMD64) - mają WŁASNĄ,
+/// niezależną od `ARG_REGS` numerację pozycyjną (patrz `lowering.rs`,
+/// `int_param_idx`/`float_param_idx`).
+const FLOAT_ARG_REGS: [&str; 8] = ["%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7"];
 const SCRATCH1: &str = "%rax";
 const SCRATCH1_B: &str = "%al";
 const SCRATCH2: &str = "%r10";
 const SCRATCH2_B: &str = "%r10b";
+/// Rejestry robocze xmm - floaty ZAWSZE rezydują w pamięci (patrz
+/// `regalloc.rs`), więc te dwa wystarczą jako czyste scratch na czas
+/// pojedynczej instrukcji (nigdy nie muszą przeżyć dłużej).
+const FSCRATCH1: &str = "%xmm0";
+const FSCRATCH2: &str = "%xmm1";
 const POOL_SAVE_BYTES: i32 = (POOL.len() as i32) * 8; // + rbp już wypchnięty osobno
 
 pub struct X86_64CodeGen {
@@ -141,6 +148,28 @@ impl X86_64CodeGen {
         }
     }
 
+    /// Ładuje wartość float tempa `t` do rejestru xmm `xmm`. Floaty zawsze
+    /// rezydują w pamięci (patrz `regalloc.rs`), więc to zawsze `movsd`
+    /// spod adresu rozlania - nigdy transfer rejestr-rejestr.
+    fn read_float(&mut self, alloc: &regalloc::RegAllocResult, locals_bytes: i32, t: Temp, xmm: &str) {
+        match alloc.home[&t] {
+            Home::Spill(k) => {
+                writeln!(self.out, "    movsd {}, {}", Self::spill_addr(locals_bytes, k), xmm).unwrap();
+            }
+            Home::Reg(_) => unreachable!("temp zmiennoprzecinkowy w rejestrze ogólnego przeznaczenia - błąd regalloc"),
+        }
+    }
+
+    /// Zapisuje wartość z rejestru xmm do miejsca zamieszkania float tempa `t`.
+    fn write_float_home(&mut self, alloc: &regalloc::RegAllocResult, locals_bytes: i32, t: Temp, xmm: &str) {
+        match alloc.home[&t] {
+            Home::Spill(k) => {
+                writeln!(self.out, "    movsd {}, {}", xmm, Self::spill_addr(locals_bytes, k)).unwrap();
+            }
+            Home::Reg(_) => unreachable!("temp zmiennoprzecinkowy w rejestrze ogólnego przeznaczenia - błąd regalloc"),
+        }
+    }
+
     fn compile_function(&mut self, func: &IrFunction) {
         let alloc = regalloc::allocate(func, POOL.len());
         let locals_bytes = (func.locals.len() as i32) * 8;
@@ -206,42 +235,59 @@ impl X86_64CodeGen {
                 writeln!(self.out, "    jnz {}", Self::label(&func.name, target)).unwrap();
             }
             IrInstruction::LoadParam { dst, index } => {
-                let arg = ARG_REGS.get(*index).unwrap_or_else(|| {
-                    panic!("Xore codegen (x86_64): >6 parametrów całkowitych nie jest obsługiwane")
-                });
-                self.write_home(alloc, locals_bytes, *dst, arg);
+                if func.float_temps.contains(dst) {
+                    let arg = FLOAT_ARG_REGS.get(*index).unwrap_or_else(|| {
+                        panic!("Xore codegen (x86_64): >8 parametrów f64 nie jest obsługiwane")
+                    });
+                    self.write_float_home(alloc, locals_bytes, *dst, arg);
+                } else {
+                    let arg = ARG_REGS.get(*index).unwrap_or_else(|| {
+                        panic!("Xore codegen (x86_64): >6 parametrów całkowitych nie jest obsługiwane")
+                    });
+                    self.write_home(alloc, locals_bytes, *dst, arg);
+                }
             }
             IrInstruction::LoadImm { dst, value } => {
-                let work = Self::work_reg(alloc, *dst);
                 match value {
                     Operand::ImmInt(v) => {
+                        let work = Self::work_reg(alloc, *dst);
                         writeln!(self.out, "    movabsq ${}, {}", v, work).unwrap();
+                        self.write_home(alloc, locals_bytes, *dst, work);
                     }
                     Operand::ImmFloat(v) => {
-                        writeln!(
-                            self.out,
-                            "    # UWAGA: literał zmiennoprzecinkowy {} przechowany jako surowe bity (IR nie niesie typu operacji arytmetycznej)",
-                            v
-                        ).unwrap();
-                        writeln!(self.out, "    movabsq ${}, {}", v.to_bits() as i64, work).unwrap();
+                        // SSE2 nie ma trybu "załaduj natychmiastowy float" -
+                        // wkładamy surowe bity do rejestru ogólnego
+                        // przeznaczenia, przenosimy je bit-w-bit do xmm
+                        // (`movq` między GP a xmm reinterpretuje bity, nie
+                        // konwertuje wartości), i dopiero stamtąd zapisujemy
+                        // do slotu tego tempa.
+                        writeln!(self.out, "    movabsq ${}, {}", v.to_bits() as i64, SCRATCH1).unwrap();
+                        writeln!(self.out, "    movq {}, {}", SCRATCH1, FSCRATCH1).unwrap();
+                        self.write_float_home(alloc, locals_bytes, *dst, FSCRATCH1);
                     }
                     Operand::ImmString(s) => {
+                        let work = Self::work_reg(alloc, *dst);
                         let clean = s.trim_matches('"');
                         let label = self.intern_string(clean);
                         writeln!(self.out, "    leaq {}(%rip), {}", label, work).unwrap();
+                        self.write_home(alloc, locals_bytes, *dst, work);
                     }
                     Operand::Loc(_) => panic!("Operand::Loc nieoczekiwany w LoadImm"),
                 }
-                self.write_home(alloc, locals_bytes, *dst, work);
             }
             IrInstruction::LoadMem { dst, src } => {
                 let addr = match src {
                     Location::StackSlot(off) => Self::slot_addr(*off),
                     Location::Temp(_) => panic!("Location::Temp nieoczekiwany w LoadMem"),
                 };
-                let work = Self::work_reg(alloc, *dst);
-                writeln!(self.out, "    movq {}, {}", addr, work).unwrap();
-                self.write_home(alloc, locals_bytes, *dst, work);
+                if func.float_temps.contains(dst) {
+                    writeln!(self.out, "    movsd {}, {}", addr, FSCRATCH1).unwrap();
+                    self.write_float_home(alloc, locals_bytes, *dst, FSCRATCH1);
+                } else {
+                    let work = Self::work_reg(alloc, *dst);
+                    writeln!(self.out, "    movq {}, {}", addr, work).unwrap();
+                    self.write_home(alloc, locals_bytes, *dst, work);
+                }
             }
             IrInstruction::LoadIndexed { dst, base_offset, index, elem_size } => {
                 // adres = rbp - K - indeks*elem_size, gdzie K odpowiada
@@ -327,32 +373,62 @@ impl X86_64CodeGen {
                     Location::StackSlot(off) => Self::slot_addr(*off),
                     Location::Temp(_) => panic!("Location::Temp nieoczekiwany w StoreMem"),
                 };
-                let s = self.read(alloc, locals_bytes, *src, SCRATCH1);
-                writeln!(self.out, "    movq {}, {}", s, addr).unwrap();
+                if func.float_temps.contains(src) {
+                    self.read_float(alloc, locals_bytes, *src, FSCRATCH1);
+                    writeln!(self.out, "    movsd {}, {}", FSCRATCH1, addr).unwrap();
+                } else {
+                    let s = self.read(alloc, locals_bytes, *src, SCRATCH1);
+                    writeln!(self.out, "    movq {}, {}", s, addr).unwrap();
+                }
             }
             IrInstruction::BinaryOp { dst, left, op, right } => {
                 self.compile_binop(alloc, locals_bytes, *dst, *left, *op, *right);
             }
             IrInstruction::Call { dst, func: callee, args } => {
-                if args.len() > ARG_REGS.len() {
-                    panic!("Xore codegen (x86_64): >6 argumentów wywołania nie jest obsługiwane");
+                if args.len() > ARG_REGS.len().max(FLOAT_ARG_REGS.len()) {
+                    panic!("Xore codegen (x86_64): zbyt wiele argumentów wywołania");
                 }
-                for (i, a) in args.iter().enumerate() {
-                    let v = self.read(alloc, locals_bytes, *a, SCRATCH1);
-                    if v != ARG_REGS[i] {
-                        writeln!(self.out, "    movq {}, {}", v, ARG_REGS[i]).unwrap();
+                // Argumenty float i int mają OSOBNE numeracje rejestrów w
+                // konwencji wywołań - dwa niezależne liczniki (patrz
+                // `lowering.rs`, ten sam podział co przy parametrach).
+                let mut int_idx = 0usize;
+                let mut float_idx = 0usize;
+                for a in args.iter() {
+                    if func.float_temps.contains(a) {
+                        let reg = *FLOAT_ARG_REGS.get(float_idx).unwrap_or_else(|| {
+                            panic!("Xore codegen (x86_64): >8 argumentów f64 nie jest obsługiwane")
+                        });
+                        self.read_float(alloc, locals_bytes, *a, reg);
+                        float_idx += 1;
+                    } else {
+                        let reg = *ARG_REGS.get(int_idx).unwrap_or_else(|| {
+                            panic!("Xore codegen (x86_64): >6 argumentów całkowitych nie jest obsługiwane")
+                        });
+                        let v = self.read(alloc, locals_bytes, *a, SCRATCH1);
+                        if v != reg {
+                            writeln!(self.out, "    movq {}, {}", v, reg).unwrap();
+                        }
+                        int_idx += 1;
                     }
                 }
                 writeln!(self.out, "    call {}", callee).unwrap();
                 if let Some(d) = dst {
-                    self.write_home(alloc, locals_bytes, *d, "%rax");
+                    if func.float_temps.contains(d) {
+                        self.write_float_home(alloc, locals_bytes, *d, FSCRATCH1);
+                    } else {
+                        self.write_home(alloc, locals_bytes, *d, "%rax");
+                    }
                 }
             }
             IrInstruction::Return(v) => {
                 if let Some(t) = v {
-                    let r = self.read(alloc, locals_bytes, *t, "%rax");
-                    if r != "%rax" {
-                        writeln!(self.out, "    movq {}, %rax", r).unwrap();
+                    if func.float_temps.contains(t) {
+                        self.read_float(alloc, locals_bytes, *t, FSCRATCH1);
+                    } else {
+                        let r = self.read(alloc, locals_bytes, *t, "%rax");
+                        if r != "%rax" {
+                            writeln!(self.out, "    movq {}, %rax", r).unwrap();
+                        }
                     }
                 } else {
                     writeln!(self.out, "    xorq %rax, %rax").unwrap();
@@ -374,6 +450,12 @@ impl X86_64CodeGen {
         op: IrBinOp,
         right: Temp,
     ) {
+        if matches!(op, IrBinOp::FAdd | IrBinOp::FSub | IrBinOp::FMul | IrBinOp::FDiv
+            | IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe)
+        {
+            self.compile_float_binop(alloc, locals_bytes, dst, left, op, right);
+            return;
+        }
         match op {
             IrBinOp::Div | IrBinOp::Mod => {
                 // idiv wymaga dzielnej w rdx:rax i dzielnika w rejestrze/pamięci
@@ -473,6 +555,66 @@ impl X86_64CodeGen {
                 writeln!(self.out, "    {} {}, {}", inst, r, work).unwrap();
                 self.write_home(alloc, locals_bytes, dst, work);
             }
+            // Nieosiągalne - odfiltrowane wcześnie przez `return` na górze
+            // funkcji, ale `match` i tak musi być wyczerpujący.
+            IrBinOp::FAdd | IrBinOp::FSub | IrBinOp::FMul | IrBinOp::FDiv
+            | IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe => {
+                unreachable!("warianty float odfiltrowane wcześniej")
+            }
+        }
+    }
+
+    /// Arytmetyka i porównania na `f64` (SSE2). Floaty zawsze rezydują w
+    /// pamięci (patrz `regalloc.rs`), więc każda operacja to: załaduj oba
+    /// operandy do xmm0/xmm1, policz, zapisz wynik z powrotem do pamięci.
+    /// Wynik porównania (`F*` poza arytmetycznymi) trafia do ZWYKŁEGO
+    /// rejestru/slotu (nie xmm) - `dst` jest wtedy typu bool/int.
+    fn compile_float_binop(
+        &mut self,
+        alloc: &regalloc::RegAllocResult,
+        locals_bytes: i32,
+        dst: Temp,
+        left: Temp,
+        op: IrBinOp,
+        right: Temp,
+    ) {
+        self.read_float(alloc, locals_bytes, left, FSCRATCH1);
+        self.read_float(alloc, locals_bytes, right, FSCRATCH2);
+        match op {
+            IrBinOp::FAdd | IrBinOp::FSub | IrBinOp::FMul | IrBinOp::FDiv => {
+                let inst = match op {
+                    IrBinOp::FAdd => "addsd",
+                    IrBinOp::FSub => "subsd",
+                    IrBinOp::FMul => "mulsd",
+                    IrBinOp::FDiv => "divsd",
+                    _ => unreachable!(),
+                };
+                // AT&T: `addsd src, dst` liczy dst = dst OP src, więc
+                // xmm0 (left) jest akumulatorem, xmm1 (right) źródłem -
+                // daje poprawną kolejność dla Sub/Div (left - right, left / right).
+                writeln!(self.out, "    {} {}, {}", inst, FSCRATCH2, FSCRATCH1).unwrap();
+                self.write_float_home(alloc, locals_bytes, dst, FSCRATCH1);
+            }
+            IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe => {
+                // `ucomisd src, dst` porównuje dst z src i ustawia flagi
+                // ZF/PF/CF podobnie jak przy porównaniu bez znaku (nie ma
+                // osobnych SF/OF dla floatów) - stąd te same warunkowe
+                // `set` co przy wariantach *U (setb/seta/setbe/setae).
+                writeln!(self.out, "    ucomisd {}, {}", FSCRATCH2, FSCRATCH1).unwrap();
+                let setcc = match op {
+                    IrBinOp::FEq => "sete",
+                    IrBinOp::FNeq => "setne",
+                    IrBinOp::FLt => "setb",
+                    IrBinOp::FGt => "seta",
+                    IrBinOp::FLe => "setbe",
+                    IrBinOp::FGe => "setae",
+                    _ => unreachable!(),
+                };
+                writeln!(self.out, "    {} {}", setcc, Self::byte_of(SCRATCH1)).unwrap();
+                writeln!(self.out, "    movzbq {}, {}", Self::byte_of(SCRATCH1), SCRATCH1).unwrap();
+                self.write_home(alloc, locals_bytes, dst, SCRATCH1);
+            }
+            _ => unreachable!("compile_float_binop wywołane z operatorem nie-float"),
         }
     }
 }
