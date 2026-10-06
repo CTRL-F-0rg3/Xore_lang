@@ -48,55 +48,29 @@ fn as_int(op: &Operand) -> Option<i64> {
 /// co zawsze jest prawdą, bo każdy Temp jest przypisywany dokładnie raz),
 /// zastępujemy operację jedną instrukcją LoadImm.
 fn constant_fold(func: &mut IrFunction) -> bool {
-    let mut int_consts: HashMap<Temp, i64> = HashMap::new();
-    let mut float_consts: HashMap<Temp, f64> = HashMap::new();
+    let mut consts: HashMap<Temp, i64> = HashMap::new();
     let mut changed = false;
 
     for i in 0..func.instructions.len() {
-        let replacement: Option<(Temp, Operand)> = match &func.instructions[i] {
+        let replacement = match &func.instructions[i] {
             IrInstruction::LoadImm { dst, value } => {
-                match value {
-                    Operand::ImmInt(v) => { int_consts.insert(*dst, *v); }
-                    Operand::ImmFloat(v) => { float_consts.insert(*dst, *v); }
-                    _ => {}
+                if let Some(v) = as_int(value) {
+                    consts.insert(*dst, v);
                 }
                 None
             }
-            IrInstruction::BinaryOp { dst, left, op, right } => match op {
-                // Arytmetyka float → wynik float.
-                IrBinOp::FAdd | IrBinOp::FSub | IrBinOp::FMul | IrBinOp::FDiv => {
-                    if let (Some(&lv), Some(&rv)) = (float_consts.get(left), float_consts.get(right)) {
-                        fold_farith(*op, lv, rv).map(|r| (*dst, Operand::ImmFloat(r)))
-                    } else {
-                        None
-                    }
+            IrInstruction::BinaryOp { dst, left, op, right } => {
+                if let (Some(&lv), Some(&rv)) = (consts.get(left), consts.get(right)) {
+                    fold_binop(*op, lv, rv).map(|result| (*dst, result))
+                } else {
+                    None
                 }
-                // Porównania float → wynik bool (int 0/1).
-                IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe => {
-                    if let (Some(&lv), Some(&rv)) = (float_consts.get(left), float_consts.get(right)) {
-                        fold_fcmp(*op, lv, rv).map(|r| (*dst, Operand::ImmInt(r)))
-                    } else {
-                        None
-                    }
-                }
-                _ => {
-                    if let (Some(&lv), Some(&rv)) = (int_consts.get(left), int_consts.get(right)) {
-                        fold_binop(*op, lv, rv).map(|r| (*dst, Operand::ImmInt(r)))
-                    } else {
-                        None
-                    }
-                }
-            },
+            }
             _ => None,
         };
-
-        if let Some((dst, operand)) = replacement {
-            func.instructions[i] = IrInstruction::LoadImm { dst, value: operand.clone() };
-            match operand {
-                Operand::ImmInt(v) => { int_consts.insert(dst, v); }
-                Operand::ImmFloat(v) => { float_consts.insert(dst, v); }
-                _ => {}
-            }
+        if let Some((dst, result)) = replacement {
+            func.instructions[i] = IrInstruction::LoadImm { dst, value: Operand::ImmInt(result) };
+            consts.insert(dst, result);
             changed = true;
         }
     }
@@ -162,36 +136,6 @@ fn fold_binop(op: IrBinOp, l: i64, r: i64) -> Option<i64> {
         | IrBinOp::FEq | IrBinOp::FNeq | IrBinOp::FLt | IrBinOp::FGt | IrBinOp::FLe | IrBinOp::FGe => {
             unreachable!("warianty float odfiltrowane wcześniej")
         }
-    })
-}
-
-/// Stałe składanie arytmetyki floatów (`FAdd`/`FSub`/`FMul`/`FDiv`).
-fn fold_farith(op: IrBinOp, l: f64, r: f64) -> Option<f64> {
-    Some(match op {
-        IrBinOp::FAdd => l + r,
-        IrBinOp::FSub => l - r,
-        IrBinOp::FMul => l * r,
-        IrBinOp::FDiv => {
-            if r == 0.0 {
-                return None;
-            }
-            l / r
-        }
-        _ => return None,
-    })
-}
-
-/// Stałe składanie porównań floatów (`FEq`/`FNeq`/`FLt`/`FGt`/`FLe`/`FGe`).
-/// Wynik porównania jest booliem, więc zwracamy 0/1 jako int.
-fn fold_fcmp(op: IrBinOp, l: f64, r: f64) -> Option<i64> {
-    Some(match op {
-        IrBinOp::FEq => (l == r) as i64,
-        IrBinOp::FNeq => (l != r) as i64,
-        IrBinOp::FLt => (l < r) as i64,
-        IrBinOp::FGt => (l > r) as i64,
-        IrBinOp::FLe => (l <= r) as i64,
-        IrBinOp::FGe => (l >= r) as i64,
-        _ => return None,
     })
 }
 
@@ -458,7 +402,6 @@ fn dead_code_elim(func: &mut IrFunction) -> bool {
     for instr in func.instructions.drain(..) {
         match instr {
             IrInstruction::LoadParam { dst, .. }
-            | IrInstruction::LoadParamStack { dst, .. }
             | IrInstruction::LoadImm { dst, .. }
             | IrInstruction::LoadMem { dst, .. }
             | IrInstruction::LoadIndexed { dst, .. }

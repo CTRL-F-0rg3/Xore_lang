@@ -55,7 +55,7 @@ fn compute_intervals(func: &IrFunction) -> Vec<Interval> {
 
     for (i, instr) in func.instructions.iter().enumerate() {
         match instr {
-            IrInstruction::LoadParam { dst, .. } | IrInstruction::LoadParamStack { dst, .. } => note_def(*dst, i, &mut def),
+            IrInstruction::LoadParam { dst, .. } => note_def(*dst, i, &mut def),
             IrInstruction::LoadImm { dst, .. } => note_def(*dst, i, &mut def),
             IrInstruction::LoadMem { dst, .. } => note_def(*dst, i, &mut def),
             IrInstruction::LoadIndexed { dst, index, .. } => {

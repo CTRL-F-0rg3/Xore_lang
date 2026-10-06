@@ -1,6 +1,5 @@
-use crate::ast::{Program, Stmt, Expr, Type, BinOp, Literal, Block, UnaryOp};
+use crate::ast::{Program, Stmt, Expr, Type, BinOp, Literal, Block};
 use crate::ir::*;
-use crate::Target;
 use std::collections::HashMap;
 
 pub struct LoweringError {
@@ -44,11 +43,6 @@ pub struct Lowering {
     fn_return_types: HashMap<String, Type>,
     stack_offset: i32,
     next_label_id: u32,
-    /// Liczba rejestrów argumentów całkowitych i zmiennoprzecinkowych w
-    /// docelowej architekturze (SysV: 6/8; RISC-V: 8/8). Nadmiarowe
-    /// parametry idą na stos.
-    max_int_regs: usize,
-    max_float_regs: usize,
 }
 
 /// Parsuje literał całkowity (patrz `crate::numlit`) i zwraca samą wartość -
@@ -59,11 +53,7 @@ fn parse_int_literal(s: &str) -> i64 {
 }
 
 impl Lowering {
-    pub fn new(target: Target) -> Self {
-        let (max_int_regs, max_float_regs) = match target {
-            Target::X86_64 => (6, 8),
-            Target::RiscV64 => (8, 8),
-        };
+    pub fn new() -> Self {
         Self {
             functions: Vec::new(),
             current_func: None,
@@ -74,8 +64,6 @@ impl Lowering {
             fn_return_types: HashMap::new(),
             stack_offset: 0,
             next_label_id: 0,
-            max_int_regs,
-            max_float_regs,
         }
     }
 
@@ -122,11 +110,6 @@ impl Lowering {
                 }
                 Type::Unknown
             }
-            Expr::ArrayInit { elements, .. } => {
-                let elem_ty = elements.first().map(|e| self.infer_expr_type(e)).unwrap_or(Type::Unknown);
-                Type::Array(Box::new(elem_ty), Some(elements.len()))
-            }
-            Expr::UnaryOp { operand, .. } => self.infer_expr_type(operand),
             _ => Type::Unknown,
         }
     }
@@ -137,9 +120,7 @@ impl Lowering {
         // wywnioskowany typ wyniku.
         for stmt in &program.stmts {
             match stmt {
-                Stmt::FnDef { name, return_type, .. }
-                | Stmt::FnDecl { name, return_type, .. }
-                | Stmt::ExternDecl { name, return_type, .. } => {
+                Stmt::FnDef { name, return_type, .. } | Stmt::FnDecl { name, return_type, .. } => {
                     self.fn_return_types.insert(name.clone(), return_type.clone().unwrap_or(Type::Unknown));
                 }
                 _ => {}
@@ -271,28 +252,8 @@ impl Lowering {
                 // konwencji wywołań (np. `fn f(a: i32, b: f64, c: i32)`
                 // przekazuje `a` w rdi, `b` w xmm0, `c` w rsi - NIE w rdx) -
                 // stąd dwa niezależne liczniki zamiast jednego `i`.
-                // Klasyfikacja parametrów: rejestrowe vs. na stosie. int/float
-                // mają osobne liczniki rejestrów; po wyczerpaniu danej puli
-                // parametr idzie na stos, a pozycję na stosie liczy się od
-                // PRAWEJ strony wywołania (0 = najprawszy parametr stosowy,
-                // najniższy adres). Dlatego najpierw liczymy łączną liczbę
-                // parametrów stosowych, potem dopiero emitujemy LoadParam/
-                // LoadParamStack z właściwymi indeksami.
-                let mut total_int = 0usize;
-                let mut total_float = 0usize;
-                for (_, param_type) in params.iter() {
-                    if Self::float_width(param_type).is_some() {
-                        total_float += 1;
-                    } else {
-                        total_int += 1;
-                    }
-                }
-                let total_stack = total_int.saturating_sub(self.max_int_regs)
-                    + total_float.saturating_sub(self.max_float_regs);
-
                 let mut int_param_idx: usize = 0;
                 let mut float_param_idx: usize = 0;
-                let mut stack_counter: usize = 0;
                 for (param_name, param_type) in params.iter() {
                     let float_w = Self::float_width(param_type);
 
@@ -306,19 +267,8 @@ impl Lowering {
                     }
 
                     let ptemp = self.new_temp();
-                    let use_register = if float_w.is_some() {
-                        float_param_idx < self.max_float_regs
-                    } else {
-                        int_param_idx < self.max_int_regs
-                    };
-                    if use_register {
-                        let class_index = if float_w.is_some() { float_param_idx } else { int_param_idx };
-                        self.emit(IrInstruction::LoadParam { dst: ptemp, index: class_index });
-                    } else {
-                        let stack_index = total_stack - 1 - stack_counter;
-                        self.emit(IrInstruction::LoadParamStack { dst: ptemp, index: stack_index });
-                        stack_counter += 1;
-                    }
+                    let class_index = if float_w.is_some() { float_param_idx } else { int_param_idx };
+                    self.emit(IrInstruction::LoadParam { dst: ptemp, index: class_index });
                     if let Some(w) = float_w {
                         self.mark_float(ptemp, w);
                         float_param_idx += 1;
@@ -450,16 +400,6 @@ impl Lowering {
             }
             Stmt::FnDecl { .. } => {}
             Stmt::Include { .. } => {}
-            Stmt::ExternDecl { .. } => {}
-            Stmt::Link { .. } => {}
-            Stmt::Return { value, .. } => {
-                let ret_temp = if let Some(expr) = value {
-                    Some(self.lower_expr(expr)?)
-                } else {
-                    None
-                };
-                self.emit(IrInstruction::Return(ret_temp));
-            }
             Stmt::Expr(expr) => {
                 self.lower_expr(expr)?;
             }
@@ -475,8 +415,7 @@ impl Lowering {
                 let value = match lit {
                     Literal::Int(s) => Operand::ImmInt(parse_int_literal(s)),
                     Literal::Float(s) => {
-                        let parsed = crate::numlit::parse_float_literal_result(s)
-                            .map_err(|e| LoweringError { message: e })?;
+                        let parsed = crate::numlit::parse_float_literal(s);
                         let width = match crate::numlit::infer_float_type(&parsed) {
                             Type::F32 => FloatWidth::F32,
                             _ => FloatWidth::F64,
@@ -509,27 +448,6 @@ impl Lowering {
                     Ok(dst)
                 } else {
                     Err(LoweringError { message: format!("Undefined variable: {}", name) })
-                }
-            }
-            Expr::UnaryOp { op, operand, .. } => {
-                let operand_temp = self.lower_expr(operand)?;
-                match op {
-                    UnaryOp::Pos => Ok(operand_temp),
-                    UnaryOp::Neg => {
-                        let ty = self.infer_expr_type(operand);
-                        let zero = self.new_temp();
-                        let dst = self.new_temp();
-                        if let Some(w) = Self::float_width(&ty) {
-                            self.mark_float(zero, w);
-                            self.mark_float(dst, w);
-                            self.emit(IrInstruction::LoadImm { dst: zero, value: Operand::ImmFloat(0.0) });
-                            self.emit(IrInstruction::BinaryOp { dst, left: zero, op: IrBinOp::FSub, right: operand_temp });
-                        } else {
-                            self.emit(IrInstruction::LoadImm { dst: zero, value: Operand::ImmInt(0) });
-                            self.emit(IrInstruction::BinaryOp { dst, left: zero, op: IrBinOp::Sub, right: operand_temp });
-                        }
-                        Ok(dst)
-                    }
                 }
             }
             Expr::BinaryOp { left, op, right, .. } => {
@@ -660,20 +578,6 @@ impl Lowering {
                 self.emit(IrInstruction::LoadMem { dst, src: result_slot });
                 Ok(dst)
             }
-            Expr::ExternCall { name, args, .. } => {
-                let mut arg_temps = Vec::new();
-                for arg in args {
-                    arg_temps.push(self.lower_expr(arg)?);
-                }
-                let dst = self.new_temp();
-                if let Some(ret_ty) = self.fn_return_types.get(name).cloned() {
-                    if let Some(w) = Self::float_width(&ret_ty) {
-                        self.mark_float(dst, w);
-                    }
-                }
-                self.emit(IrInstruction::Call { dst: Some(dst), func: name.clone(), args: arg_temps });
-                Ok(dst)
-            }
             Expr::Call { callee, args, .. } => {
                 let func_name = if let Expr::Variable(name) = callee.as_ref() {
                     name.clone()
@@ -695,103 +599,80 @@ impl Lowering {
                 self.emit(IrInstruction::Call { dst: Some(dst), func: func_name, args: arg_temps });
                 Ok(dst)
             }
-            Expr::ArrayInit { elements, .. } => {
-                // Literał tablicowy użyty poza `let arr = [...]`: alokujemy
-                // elementy na stosie (dokładnie tak jak w `Stmt::Let`) i
-                // zwracamy adres elementu 0 — tablica "rozpada się" do
-                // wskaźnika (jak w C). Dzięki temu `f([1,2,3])` przekazuje
-                // wskaźnik, a `[1,2,3][1]` indeksuje przez wskaźnik.
-                let mut elem0_offset = 0;
-                for (i, elem) in elements.iter().enumerate() {
-                    self.stack_offset -= 8;
-                    if i == 0 {
-                        elem0_offset = self.stack_offset;
-                    }
-                    let slot = Location::StackSlot(self.stack_offset);
-                    if let Some(func) = &mut self.current_func {
-                        func.locals.push((format!("arr_elem{}", i), Type::Unknown));
-                    }
-                    let val_temp = self.lower_expr(elem)?;
-                    self.emit(IrInstruction::StoreMem { dst: slot, src: val_temp });
-                }
+            Expr::ArrayInit { .. } => {
+                // Literał tablicowy jest w pełni obsługiwany tylko jako
+                // bezpośrednia wartość `let arr: [T;N] = [...]` (patrz
+                // Stmt::Let wyżej), bo tam wiemy, gdzie fizycznie ulokować
+                // jego elementy. Użyty w jakimkolwiek innym miejscu (jako
+                // argument wywołania, zagnieżdżony w innym wyrażeniu, itp.)
+                // nie ma dokąd "wylądować" - to świadomie nieobsługiwany
+                // przypadek (patrz README), zwracamy stałe 0 zamiast fałszywie
+                // udawać, że coś sensownego się stało.
                 let dst = self.new_temp();
-                self.emit(IrInstruction::LoadAddr { dst, base_offset: elem0_offset });
+                self.emit(IrInstruction::LoadImm { dst, value: Operand::ImmInt(0) });
                 Ok(dst)
             }
             Expr::Index { array, index, .. } => {
-                if let Expr::Variable(n) = array.as_ref() {
-                    let name = n.clone();
-
-                    // Przypadek 1: tablica lokalna (`let arr = [...]`) - stały,
-                    // znany w czasie kompilacji offset w bieżącej ramce.
-                    if let Some(&(elem0_offset, _len, ref elem_ty)) = self.array_map.get(&name) {
-                        let float_w = Self::float_width(elem_ty);
-                        // Indeks znany w czasie kompilacji: zamień na zwykły
-                        // LoadMem pod stałym adresem - korzysta z istniejących
-                        // optymalizacji (store->load forwarding, DCE) tak samo jak
-                        // każda inna zmienna, zamiast zawsze liczyć adres w runtime.
-                        if let Expr::Literal(Literal::Int(s)) = index.as_ref() {
-                            let idx = parse_int_literal(s);
-                            let dst = self.new_temp();
-                            self.emit(IrInstruction::LoadMem {
-                                dst,
-                                src: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
-                            });
-                            if let Some(w) = float_w {
-                                self.mark_float(dst, w);
-                            }
-                            return Ok(dst);
-                        }
-
-                        let idx_temp = self.lower_expr(index)?;
-                        let dst = self.new_temp();
-                        self.emit(IrInstruction::LoadIndexed { dst, base_offset: elem0_offset, index: idx_temp, elem_size: 8 });
-                        if let Some(w) = float_w {
-                            self.mark_float(dst, w);
-                        }
-                        return Ok(dst);
-                    }
-
-                    // Przypadek 2: parametr tablicowy - wartość to WSKAŹNIK
-                    // (adres w ramce WYWOŁUJĄCEGO), znany dopiero w runtime.
-                    if let Some(elem_ty) = self.ptr_array_params.get(&name).cloned() {
-                        let float_w = Self::float_width(&elem_ty);
-                        let base_loc = self.var_map.get(&name).cloned().ok_or_else(|| LoweringError {
-                            message: format!("Wewnętrzny błąd: brak lokalizacji parametru '{}'", name),
-                        })?;
-                        let base_temp = self.new_temp();
-                        self.emit(IrInstruction::LoadMem { dst: base_temp, src: base_loc });
-
-                        let idx_temp = self.lower_expr(index)?;
-                        let dst = self.new_temp();
-                        self.emit(IrInstruction::LoadIndexedPtr { dst, base: base_temp, index: idx_temp, elem_size: 8 });
-                        if let Some(w) = float_w {
-                            self.mark_float(dst, w);
-                        }
-                        return Ok(dst);
-                    }
-
+                let name = if let Expr::Variable(n) = array.as_ref() {
+                    n.clone()
+                } else {
                     return Err(LoweringError {
-                        message: format!("'{}' nie jest ani zainicjalizowaną tablicą lokalną, ani parametrem tablicowym", name),
+                        message: "Indeksowanie jest dziś obsługiwane tylko bezpośrednio na zmiennej tablicowej (np. `arr[i]`, nie `f()[i]`)".to_string(),
                     });
+                };
+
+                // Przypadek 1: tablica lokalna (`let arr = [...]`) - stały,
+                // znany w czasie kompilacji offset w bieżącej ramce.
+                if let Some(&(elem0_offset, _len, ref elem_ty)) = self.array_map.get(&name) {
+                    let float_w = Self::float_width(elem_ty);
+                    // Indeks znany w czasie kompilacji: zamień na zwykły
+                    // LoadMem pod stałym adresem - korzysta z istniejących
+                    // optymalizacji (store->load forwarding, DCE) tak samo jak
+                    // każda inna zmienna, zamiast zawsze liczyć adres w runtime.
+                    if let Expr::Literal(Literal::Int(s)) = index.as_ref() {
+                        let idx = parse_int_literal(s);
+                        let dst = self.new_temp();
+                        self.emit(IrInstruction::LoadMem {
+                            dst,
+                            src: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
+                        });
+                        if let Some(w) = float_w {
+                            self.mark_float(dst, w);
+                        }
+                        return Ok(dst);
+                    }
+
+                    let idx_temp = self.lower_expr(index)?;
+                    let dst = self.new_temp();
+                    self.emit(IrInstruction::LoadIndexed { dst, base_offset: elem0_offset, index: idx_temp, elem_size: 8 });
+                    if let Some(w) = float_w {
+                        self.mark_float(dst, w);
+                    }
+                    return Ok(dst);
                 }
 
-                // Dowolne wyrażenie tablicowe (np. `[1,2,3][i]` albo `f()[i]`):
-                // jego wartość to już wskaźnik do elementu 0 (patrz
-                // `Expr::ArrayInit` i przekazywanie tablic jako parametrów),
-                // więc indeksujemy przez wskaźnik.
-                let elem_ty = match self.infer_expr_type(array) {
-                    Type::Array(elem, _) => *elem,
-                    _ => Type::Unknown,
-                };
-                let base = self.lower_expr(array)?;
-                let idx_temp = self.lower_expr(index)?;
-                let dst = self.new_temp();
-                self.emit(IrInstruction::LoadIndexedPtr { dst, base, index: idx_temp, elem_size: 8 });
-                if let Some(w) = Self::float_width(&elem_ty) {
-                    self.mark_float(dst, w);
+                // Przypadek 2: parametr tablicowy - wartość to WSKAŹNIK
+                // (adres w ramce WYWOŁUJĄCEGO), znany dopiero w runtime.
+                if let Some(elem_ty) = self.ptr_array_params.get(&name).cloned() {
+                    let float_w = Self::float_width(&elem_ty);
+                    let base_loc = self.var_map.get(&name).cloned().ok_or_else(|| LoweringError {
+                        message: format!("Wewnętrzny błąd: brak lokalizacji parametru '{}'", name),
+                    })?;
+                    let base_temp = self.new_temp();
+                    self.emit(IrInstruction::LoadMem { dst: base_temp, src: base_loc });
+
+                    let idx_temp = self.lower_expr(index)?;
+                    let dst = self.new_temp();
+                    self.emit(IrInstruction::LoadIndexedPtr { dst, base: base_temp, index: idx_temp, elem_size: 8 });
+                    if let Some(w) = float_w {
+                        self.mark_float(dst, w);
+                    }
+                    return Ok(dst);
                 }
-                Ok(dst)
+
+                Err(LoweringError {
+                    message: format!("'{}' nie jest ani zainicjalizowaną tablicą lokalną, ani parametrem tablicowym", name),
+                })
             }
         }
     }
@@ -801,44 +682,41 @@ impl Lowering {
     /// przez `BinaryOp` z `SyncAssign` w przypadku, gdy prawa strona jest
     /// indeksowaniem.
     fn lower_index_store(&mut self, array: &Expr, index: &Expr, src: Temp) -> Result<(), LoweringError> {
-        if let Expr::Variable(n) = array {
-            let name = n.clone();
-
-            if let Some(&(elem0_offset, _len, _)) = self.array_map.get(&name) {
-                if let Expr::Literal(Literal::Int(s)) = index {
-                    let idx = parse_int_literal(s);
-                    self.emit(IrInstruction::StoreMem {
-                        dst: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
-                        src,
-                    });
-                    return Ok(());
-                }
-                let idx_temp = self.lower_expr(index)?;
-                self.emit(IrInstruction::StoreIndexed { base_offset: elem0_offset, index: idx_temp, src, elem_size: 8 });
-                return Ok(());
-            }
-
-            if self.ptr_array_params.contains_key(&name) {
-                let base_loc = self.var_map.get(&name).cloned().ok_or_else(|| LoweringError {
-                    message: format!("Wewnętrzny błąd: brak lokalizacji parametru '{}'", name),
-                })?;
-                let base_temp = self.new_temp();
-                self.emit(IrInstruction::LoadMem { dst: base_temp, src: base_loc });
-                let idx_temp = self.lower_expr(index)?;
-                self.emit(IrInstruction::StoreIndexedPtr { base: base_temp, index: idx_temp, src, elem_size: 8 });
-                return Ok(());
-            }
-
+        let name = if let Expr::Variable(n) = array {
+            n.clone()
+        } else {
             return Err(LoweringError {
-                message: format!("'{}' nie jest ani zainicjalizowaną tablicą lokalną, ani parametrem tablicowym", name),
+                message: "Zapis przez indeks jest dziś obsługiwany tylko bezpośrednio na zmiennej tablicowej".to_string(),
             });
+        };
+
+        if let Some(&(elem0_offset, _len, _)) = self.array_map.get(&name) {
+            if let Expr::Literal(Literal::Int(s)) = index {
+                let idx = parse_int_literal(s);
+                self.emit(IrInstruction::StoreMem {
+                    dst: Location::StackSlot(elem0_offset - 8 * (idx as i32)),
+                    src,
+                });
+                return Ok(());
+            }
+            let idx_temp = self.lower_expr(index)?;
+            self.emit(IrInstruction::StoreIndexed { base_offset: elem0_offset, index: idx_temp, src, elem_size: 8 });
+            return Ok(());
         }
 
-        // Dowolne wyrażenie tablicowe (np. `1 $~ [0,0][0];`): wartość to
-        // wskaźnik do elementu 0, więc zapisujemy przez wskaźnik.
-        let base = self.lower_expr(array)?;
-        let idx_temp = self.lower_expr(index)?;
-        self.emit(IrInstruction::StoreIndexedPtr { base, index: idx_temp, src, elem_size: 8 });
-        Ok(())
+        if self.ptr_array_params.contains_key(&name) {
+            let base_loc = self.var_map.get(&name).cloned().ok_or_else(|| LoweringError {
+                message: format!("Wewnętrzny błąd: brak lokalizacji parametru '{}'", name),
+            })?;
+            let base_temp = self.new_temp();
+            self.emit(IrInstruction::LoadMem { dst: base_temp, src: base_loc });
+            let idx_temp = self.lower_expr(index)?;
+            self.emit(IrInstruction::StoreIndexedPtr { base: base_temp, index: idx_temp, src, elem_size: 8 });
+            return Ok(());
+        }
+
+        Err(LoweringError {
+            message: format!("'{}' nie jest ani zainicjalizowaną tablicą lokalną, ani parametrem tablicowym", name),
+        })
     }
 }

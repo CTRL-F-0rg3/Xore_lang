@@ -117,13 +117,6 @@ pub struct ParsedFloat {
 /// wartość i opcjonalny jawny sufiks typu. Mirror `parse_int_literal` -
 /// ten sam powód istnienia (spójność między `checker.rs` i `lowering.rs`).
 pub fn parse_float_literal(text: &str) -> ParsedFloat {
-    parse_float_literal_result(text).unwrap_or(ParsedFloat { value: 0.0, suffix: None })
-}
-
-/// Jak `parse_float_literal`, ale zamiast cicho podstawiać `0.0` przy
-/// zniekształconym literale (np. `1e`, `1e+`, `1.2.3`) zgłasza czytelny błąd.
-/// `lowering.rs` używa tej wersji, żeby błąd nie znikał po drodze.
-pub fn parse_float_literal_result(text: &str) -> Result<ParsedFloat, String> {
     let (num_part, suffix) = if let Some(s) = text.strip_suffix("_f32") {
         (s, Some(FloatSuffix::F32))
     } else if let Some(s) = text.strip_suffix("_f64") {
@@ -131,11 +124,8 @@ pub fn parse_float_literal_result(text: &str) -> Result<ParsedFloat, String> {
     } else {
         (text, None)
     };
-    let clean: String = num_part.chars().filter(|&c| c != '_').collect();
-    let value = clean
-        .parse::<f64>()
-        .map_err(|_| format!("Nieprawidłowy literał zmiennoprzecinkowy: `{}`", text))?;
-    Ok(ParsedFloat { value, suffix })
+    let value = num_part.parse().unwrap_or(0.0);
+    ParsedFloat { value, suffix }
 }
 
 /// Wnioskuje typ Xore dla literału float: jawny sufiks wygrywa; bez

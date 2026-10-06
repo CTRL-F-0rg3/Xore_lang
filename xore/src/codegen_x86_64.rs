@@ -255,19 +255,6 @@ impl X86_64CodeGen {
                     self.write_home(alloc, locals_bytes, *dst, arg);
                 }
             }
-            IrInstruction::LoadParamStack { dst, index } => {
-                // Parametr stosowy: `[%rbp + 16]` to pierwszy (najprawszy)
-                // argument stosowy — po zapisanym %rbp (8) i adresie powrotu (8).
-                let addr = format!("{}(%rbp)", 16 + index * 8);
-                if let Some(&width) = func.float_temps.get(dst) {
-                    writeln!(self.out, "    {} {}, {}", Self::float_mov(width), addr, FSCRATCH1).unwrap();
-                    self.write_float_home(alloc, locals_bytes, *dst, FSCRATCH1, width);
-                } else {
-                    let work = Self::work_reg(alloc, *dst);
-                    writeln!(self.out, "    movq {}, {}", addr, work).unwrap();
-                    self.write_home(alloc, locals_bytes, *dst, work);
-                }
-            }
             IrInstruction::LoadImm { dst, value } => {
                 match value {
                     Operand::ImmInt(v) => {
@@ -418,73 +405,35 @@ impl X86_64CodeGen {
                 self.compile_binop(func, alloc, locals_bytes, *dst, *left, *op, *right);
             }
             IrInstruction::Call { dst, func: callee, args } => {
-                // Argumenty float i int mają OSOBNE numeracje rejestrów. Te,
-                // które nie mieszczą się w rejestrach, idą na stos w kolejności
-                // od prawej do lewej (indeks 0 = najprawszy, najniższy adres).
-                let mut int_idx = 0usize;
-                let mut float_idx = 0usize;
-                let mut stack_args: Vec<(Temp, Option<FloatWidth>)> = Vec::new();
-                for a in args.iter() {
-                    let fw = func.float_temps.get(a).copied();
-                    if fw.is_some() {
-                        if float_idx >= FLOAT_ARG_REGS.len() {
-                            stack_args.push((*a, fw));
-                        }
-                        float_idx += 1;
-                    } else {
-                        if int_idx >= ARG_REGS.len() {
-                            stack_args.push((*a, None));
-                        }
-                        int_idx += 1;
-                    }
+                if args.len() > ARG_REGS.len().max(FLOAT_ARG_REGS.len()) {
+                    panic!("Xore codegen (x86_64): zbyt wiele argumentów wywołania");
                 }
-
-                let stack_bytes = Self::round16((stack_args.len() as i32) * 8);
-                if stack_bytes > 0 {
-                    writeln!(self.out, "    subq ${}, %rsp", stack_bytes).unwrap();
-                    for (i, (t, fw)) in stack_args.iter().enumerate() {
-                        let pos = stack_args.len() - 1 - i;
-                        let addr = format!("{}(%rsp)", pos * 8);
-                        match fw {
-                            Some(w) => {
-                                self.read_float(alloc, locals_bytes, *t, FSCRATCH1, *w);
-                                writeln!(self.out, "    {} {}, {}", Self::float_mov(*w), FSCRATCH1, addr).unwrap();
-                            }
-                            None => {
-                                let v = self.read(alloc, locals_bytes, *t, SCRATCH1);
-                                writeln!(self.out, "    movq {}, {}", v, addr).unwrap();
-                            }
-                        }
-                    }
-                }
-
+                // Argumenty float i int mają OSOBNE numeracje rejestrów w
+                // konwencji wywołań - dwa niezależne liczniki (patrz
+                // `lowering.rs`, ten sam podział co przy parametrach).
+                // f32 i f64 dzielą tę samą pulę xmm (SysV liczy je razem),
+                // różni je tylko szerokość instrukcji ładującej.
                 let mut int_idx = 0usize;
                 let mut float_idx = 0usize;
                 for a in args.iter() {
                     if let Some(&width) = func.float_temps.get(a) {
-                        if float_idx < FLOAT_ARG_REGS.len() {
-                            let reg = FLOAT_ARG_REGS[float_idx];
-                            self.read_float(alloc, locals_bytes, *a, reg, width);
-                        }
+                        let reg = *FLOAT_ARG_REGS.get(float_idx).unwrap_or_else(|| {
+                            panic!("Xore codegen (x86_64): >8 argumentów f32/f64 nie jest obsługiwane")
+                        });
+                        self.read_float(alloc, locals_bytes, *a, reg, width);
                         float_idx += 1;
                     } else {
-                        if int_idx < ARG_REGS.len() {
-                            let reg = ARG_REGS[int_idx];
-                            let v = self.read(alloc, locals_bytes, *a, SCRATCH1);
-                            if v != reg {
-                                writeln!(self.out, "    movq {}, {}", v, reg).unwrap();
-                            }
+                        let reg = *ARG_REGS.get(int_idx).unwrap_or_else(|| {
+                            panic!("Xore codegen (x86_64): >6 argumentów całkowitych nie jest obsługiwane")
+                        });
+                        let v = self.read(alloc, locals_bytes, *a, SCRATCH1);
+                        if v != reg {
+                            writeln!(self.out, "    movq {}, {}", v, reg).unwrap();
                         }
                         int_idx += 1;
                     }
                 }
-
                 writeln!(self.out, "    call {}", callee).unwrap();
-
-                if stack_bytes > 0 {
-                    writeln!(self.out, "    addq ${}, %rsp", stack_bytes).unwrap();
-                }
-
                 if let Some(d) = dst {
                     if let Some(&width) = func.float_temps.get(d) {
                         self.write_float_home(alloc, locals_bytes, *d, FSCRATCH1, width);

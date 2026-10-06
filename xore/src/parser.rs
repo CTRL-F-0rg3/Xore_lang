@@ -16,19 +16,15 @@ pub struct Parser<'src> {
 impl<'src> Parser<'src> {
     pub fn new(source: &'src str) -> Self {
         let lexer = Lexer::new(source);
-        let mut errors = Vec::new();
         let tokens: Vec<Token<'src>> = lexer
         .filter_map(|res| match res {
             Ok(tok) if matches!(tok.kind, TokenKind::Whitespace(_) | TokenKind::Comment(_)) => None,
-            Ok(tok) => Some(tok),
-            Err(e) => {
-                errors.push(ParseError { message: e.message, span: e.span });
-                None
-            }
+                    Ok(tok) => Some(tok),
+                    Err(e) => panic!("Lexer error: {:?}", e),
         })
         .collect();
 
-        Self { tokens, current: 0, errors }
+        Self { tokens, current: 0, errors: Vec::new() }
     }
 
     pub fn has_errors(&self) -> bool { !self.errors.is_empty() }
@@ -93,19 +89,6 @@ impl<'src> Parser<'src> {
             TokenKind::KwLet => { self.advance(); self.parse_let(span) }
             TokenKind::KwEnum => { self.advance(); self.parse_enum_def(span) }
             TokenKind::KwInclude => { self.advance(); self.parse_include(span) }
-            TokenKind::KwExt => {
-                self.advance();
-                if *self.peek() == TokenKind::ColonColon {
-                    // `ext::'c'::funkcja(...);` użyte jako instrukcja.
-                    let expr = self.parse_extern_call_expr(span)?;
-                    self.expect(TokenKind::Semicolon)?;
-                    Ok(Stmt::Expr(Box::new(expr)))
-                } else {
-                    self.parse_extern_decl(span)
-                }
-            }
-            TokenKind::KwLink => { self.advance(); self.parse_link(span) }
-            TokenKind::KwReturn => { self.advance(); self.parse_return(span) }
             _ => {
                 let expr = self.parse_expr(0)?;
                 self.expect(TokenKind::Semicolon)?;
@@ -115,13 +98,6 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_let(&mut self, span: Span) -> Result<Stmt, ParseError> {
-        let is_mut = if *self.peek() == TokenKind::KwMut {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
         let name = if let TokenKind::Identifier(n) = self.peek() { n.to_string() } else { return Err(ParseError { message: "Expected identifier after let".into(), span }); };
         self.advance();
 
@@ -133,7 +109,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Eq)?;
         let value = Box::new(self.parse_expr(0)?);
         self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Let { name, typ, value, is_mut, span })
+        Ok(Stmt::Let { name, typ, value, span })
     }
 
     fn parse_fn_def_or_decl(&mut self, vis: Visibility, span: Span) -> Result<Stmt, ParseError> {
@@ -179,106 +155,6 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Semicolon)?;
 
         Ok(Stmt::Include { path, span })
-    }
-
-    /// Parsuje tag języka FFI, np. `'c'`, i zwraca sam znak (bez apostrofów).
-    fn parse_char_lang(&mut self) -> Result<String, ParseError> {
-        match self.peek() {
-            TokenKind::CharLiteral(text) => {
-                let raw = text.to_string();
-                self.advance();
-                let inner = raw.trim_start_matches('\'').trim_end_matches('\'');
-                Ok(inner.to_string())
-            }
-            _ => Err(ParseError {
-                message: "Oczekiwano tagu języka FFI, np. 'c'".into(),
-                span: self.peek_span(),
-            }),
-        }
-    }
-
-    /// Parsuje deklarację zewnętrzną: `ext 'c' fn nazwa(params) -> T;`.
-    fn parse_extern_decl(&mut self, span: Span) -> Result<Stmt, ParseError> {
-        let lang = self.parse_char_lang()?;
-        self.expect(TokenKind::KwFn)?;
-        let name = if let TokenKind::Identifier(n) = self.peek() {
-            let s = n.to_string();
-            self.advance();
-            s
-        } else {
-            return Err(ParseError { message: "Oczekiwano nazwy funkcji w deklaracji ext".into(), span: self.peek_span() });
-        };
-
-        self.expect(TokenKind::LParen)?;
-        let mut params = Vec::new();
-        if *self.peek() != TokenKind::RParen {
-            loop {
-                let param_name = if let TokenKind::Identifier(n) = self.peek() { n.to_string() } else { return Err(ParseError { message: "Oczekiwano nazwy parametru".into(), span: self.peek_span() }); };
-                self.advance();
-                self.expect(TokenKind::Colon)?;
-                let param_type = self.parse_type()?;
-                params.push((param_name, param_type));
-                if *self.peek() == TokenKind::Comma { self.advance(); } else { break; }
-            }
-        }
-        self.expect(TokenKind::RParen)?;
-
-        let return_type = if *self.peek() == TokenKind::ThinArrow {
-            self.advance();
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
-        self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::ExternDecl { lang, name, params, return_type, span })
-    }
-
-    /// Parsuje wywołanie FFI: `ext::'c'::nazwa(args)`.
-    fn parse_extern_call_expr(&mut self, span: Span) -> Result<Expr, ParseError> {
-        self.expect(TokenKind::ColonColon)?;
-        let lang = self.parse_char_lang()?;
-        self.expect(TokenKind::ColonColon)?;
-        let name = if let TokenKind::Identifier(n) = self.peek() {
-            let s = n.to_string();
-            self.advance();
-            s
-        } else {
-            return Err(ParseError { message: "Oczekiwano nazwy funkcji po ext::'c'::".into(), span: self.peek_span() });
-        };
-        self.expect(TokenKind::LParen)?;
-        let args = self.parse_args()?;
-        self.expect(TokenKind::RParen)?;
-        Ok(Expr::ExternCall { lang, name, args, span })
-    }
-
-    /// Parsuje dyrektywę linkera: `link "-lm";`.
-    fn parse_link(&mut self, span: Span) -> Result<Stmt, ParseError> {
-        let mut flags = Vec::new();
-        loop {
-            match self.peek() {
-                TokenKind::StringLiteral(s) => {
-                    flags.push(s.trim_matches('"').to_string());
-                    self.advance();
-                }
-                _ => break,
-            }
-        }
-        if flags.is_empty() {
-            return Err(ParseError { message: "Oczekiwano co najmniej jednej flagi linkera po 'link'".into(), span });
-        }
-        self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Link { flags, span })
-    }
-
-    /// Parsuje `return [wyrażenie];` — jawny powrót z funkcji.
-    fn parse_return(&mut self, span: Span) -> Result<Stmt, ParseError> {
-        let value = if *self.peek() == TokenKind::Semicolon {
-            None
-        } else {
-            Some(Box::new(self.parse_expr(0)?))
-        };
-        self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Return { value, span })
     }
 
     fn parse_enum_def(&mut self, span: Span) -> Result<Stmt, ParseError> {
@@ -374,25 +250,10 @@ impl<'src> Parser<'src> {
             }
             TokenKind::IntLiteral(n) => { let val = n.to_string(); self.advance(); Ok(Expr::Literal(Literal::Int(val))) }
             TokenKind::FloatLiteral(n) => { let val = n.to_string(); self.advance(); Ok(Expr::Literal(Literal::Float(val))) }
-            TokenKind::StringLiteral(n) => { let val = unescape_string(n); self.advance(); Ok(Expr::Literal(Literal::String(val))) }
-            TokenKind::RawStringLiteral(n) => { let val = clean_raw_string(n); self.advance(); Ok(Expr::Literal(Literal::String(val))) }
+            TokenKind::StringLiteral(n) | TokenKind::RawStringLiteral(n) => { let val = n.to_string(); self.advance(); Ok(Expr::Literal(Literal::String(val))) }
             TokenKind::KwTrue => { self.advance(); Ok(Expr::Literal(Literal::Bool(true))) }
             TokenKind::KwFalse => { self.advance(); Ok(Expr::Literal(Literal::Bool(false))) }
             TokenKind::KwNone => { self.advance(); Ok(Expr::Literal(Literal::None)) }
-            TokenKind::Minus => {
-                self.advance();
-                let operand = self.parse_prefix()?;
-                Ok(Expr::UnaryOp { op: UnaryOp::Neg, operand: Box::new(operand), span })
-            }
-            TokenKind::Plus => {
-                self.advance();
-                let operand = self.parse_prefix()?;
-                Ok(Expr::UnaryOp { op: UnaryOp::Pos, operand: Box::new(operand), span })
-            }
-            TokenKind::KwExt => {
-                self.advance();
-                self.parse_extern_call_expr(span)
-            }
             TokenKind::KwIf => {
                 self.advance();
                 self.parse_if_expr(span)
@@ -486,59 +347,3 @@ impl<'src> Parser<'src> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Associativity { Left, Right }
-
-/// Rozwija sekwencje escape w zwykłym stringu (`\n`, `\t`, `\r`, `\0`, `\\`,
-/// `\"`, `\'`, `\xHH`) i usuwa zewnętrzne cudzysłowy. `raw` to tekst tokenu
-/// prosto z lexera, np. `"a\\nb"` (razem z cudzysłowami).
-fn unescape_string(raw: &str) -> String {
-    let inner = raw
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(raw);
-
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('0') => out.push('\0'),
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
-            Some('x') => {
-                let a = chars.next();
-                let b = chars.next();
-                if let (Some(a), Some(b)) = (a, b) {
-                    if let Ok(v) = u8::from_str_radix(&format!("{}{}", a, b), 16) {
-                        out.push(v as char);
-                        continue;
-                    }
-                }
-                out.push_str("\\x");
-                if let Some(a) = a { out.push(a); }
-                if let Some(b) = b { out.push(b); }
-            }
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-/// Czyści raw string: usuwa prefiks `r"` i końcowy cudzysłów (bez rozwijania
-/// escape'ów — to właśnie po to są raw stringi).
-fn clean_raw_string(raw: &str) -> String {
-    raw.strip_prefix("r\"")
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(raw)
-        .to_string()
-}

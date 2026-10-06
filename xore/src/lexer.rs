@@ -23,7 +23,7 @@ pub enum TokenKind<'src> {
     KwPublic, KwFn, KwLet, KwIf, KwElse, KwWhile, KwFor, KwIn, KwRange,
     KwEnum, KwSelf, KwEnd,
     KwTrue, KwFalse, KwNone,
-    KwInclude, KwExt, KwLink, KwMut, KwReturn,
+    KwInclude,
 
     IntLiteral(&'src str),
     FloatLiteral(&'src str),
@@ -52,7 +52,7 @@ pub enum TokenKind<'src> {
     Eq, Less, Greater, Tilde, Pipe, Ampersand, Hash, Dollar,
 
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Semicolon, Colon, ColonColon, Dot,
+    Comma, Semicolon, Colon, Dot,
 
     Comment(&'src str),
     Whitespace(&'src str),
@@ -172,10 +172,6 @@ impl<'src> Lexer<'src> {
             "False" => TokenKind::KwFalse,
             "None" => TokenKind::KwNone,
             "include" => TokenKind::KwInclude,
-            "ext" => TokenKind::KwExt,
-            "link" => TokenKind::KwLink,
-            "mut" => TokenKind::KwMut,
-            "return" => TokenKind::KwReturn,
             _ => TokenKind::Identifier(text),
         };
         Token {
@@ -395,7 +391,6 @@ impl<'src> Lexer<'src> {
 
         if let Some(op) = two_char {
             match op {
-                "::" => { self.current += 2; return Token { kind: TokenKind::ColonColon, span: Span { start: _start, end: self.current } }; }
                 "=>" => { self.current += 2; return Token { kind: TokenKind::FatArrow, span: Span { start: _start, end: self.current } }; }
                 "->" => { self.current += 2; return Token { kind: TokenKind::ThinArrow, span: Span { start: _start, end: self.current } }; }
                 "|=" => { self.current += 2; return Token { kind: TokenKind::PipeEq, span: Span { start: _start, end: self.current } }; }

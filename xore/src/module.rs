@@ -42,7 +42,7 @@ impl ModuleSystem {
         let path_buf = PathBuf::from(path);
 
         let ext = path_buf.extension().and_then(|e| e.to_str()).ok_or("No file extension")?;
-        if ext != "xre" && ext != "xrh" && ext != "xlib" {
+        if ext != "xre" && ext != "xrh" {
             return Err(format!("Unsupported file extension: {}", ext));
         }
 
@@ -54,9 +54,9 @@ impl ModuleSystem {
 
         if parser.has_errors() {
             let details = parser.get_errors().iter()
-                .map(|e| crate::style::render_error(&source, path, e.span.start, e.span.end, &e.message))
-                .collect::<Vec<_>>().join("\n");
-            return Err(details);
+                .map(|e| format!("{:?} @ {}..{}", e.message, e.span.start, e.span.end))
+                .collect::<Vec<_>>().join("; ");
+            return Err(format!("Parse errors in {}: {}", path, details));
         }
 
         let mut declarations = HashMap::new();
@@ -113,13 +113,9 @@ impl ModuleSystem {
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut defs: HashMap<String, Stmt> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
-        let mut externs: Vec<Stmt> = Vec::new();
-        let mut links: Vec<Stmt> = Vec::new();
-        self.collect_defs(entry_path, &mut visited, &mut defs, &mut order, &mut externs, &mut links)?;
+        self.collect_defs(entry_path, &mut visited, &mut defs, &mut order)?;
 
-        let mut stmts: Vec<Stmt> = order.into_iter().filter_map(|name| defs.remove(&name)).collect();
-        stmts.extend(externs);
-        stmts.extend(links);
+        let stmts = order.into_iter().filter_map(|name| defs.remove(&name)).collect();
         Ok(Program { stmts })
     }
 
@@ -129,8 +125,6 @@ impl ModuleSystem {
         visited: &mut std::collections::HashSet<String>,
         defs: &mut HashMap<String, Stmt>,
         order: &mut Vec<String>,
-        externs: &mut Vec<Stmt>,
-        links: &mut Vec<Stmt>,
     ) -> Result<(), String> {
         let canonical = path.to_string();
         if visited.contains(&canonical) {
@@ -155,7 +149,7 @@ impl ModuleSystem {
                 Stmt::Include { path: inc, .. } => {
                     let inc_path = dir.join(inc);
                     let inc_str = inc_path.to_string_lossy().to_string();
-                    self.collect_defs(&inc_str, visited, defs, order, externs, links)?;
+                    self.collect_defs(&inc_str, visited, defs, order)?;
                 }
                 Stmt::FnDef { name, .. } => {
                     if !defs.contains_key(name) {
@@ -164,14 +158,6 @@ impl ModuleSystem {
                     // Definicja w pliku ładowanym później nadpisuje wcześniejszą
                     // deklarację/definicję o tej samej nazwie (jak w C: .c > .h).
                     defs.insert(name.clone(), stmt);
-                }
-                Stmt::ExternDecl { name, .. } => {
-                    if !externs.iter().any(|s| matches!(s, Stmt::ExternDecl { name: n, .. } if n == name)) {
-                        externs.push(stmt);
-                    }
-                }
-                Stmt::Link { .. } => {
-                    links.push(stmt);
                 }
                 _ => {}
             }

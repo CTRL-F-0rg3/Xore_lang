@@ -45,7 +45,7 @@ fn find_driver(target: Target) -> Option<String> {
 /// cross-kompilator RISC-V) nie jest zainstalowany na tej maszynie, zwraca
 /// czytelny błąd zamiast udawać sukces - plik `.s` zostaje na dysku, więc
 /// nic nie ginie.
-pub fn assemble_and_link(target: Target, asm_path: &Path, out_path: &Path, link_flags: &[String]) -> Result<(), String> {
+pub fn assemble_and_link(target: Target, asm_path: &Path, out_path: &Path) -> Result<(), String> {
     let driver = find_driver(target).ok_or_else(|| {
         let candidates = candidate_drivers(target).join(", ");
         format!(
@@ -64,28 +64,22 @@ pub fn assemble_and_link(target: Target, asm_path: &Path, out_path: &Path, link_
     })?;
 
     let mut cmd = Command::new(&driver);
-    cmd.arg(asm_path).arg("-o").arg(out_path);
-    if link_flags.is_empty() {
-        // Czysty program Xore: budujemy w pełni freestanding: bez libc, bez
+    cmd.arg(asm_path)
+        .arg("-o")
+        .arg(out_path)
+        .arg("-static")
+        // Xore jest zawsze budowany jako plik freestanding: bez libc, bez
         // crt0/crt1 - punkt wejścia to nasz własny `_start` (patrz
         // codegen_x86_64.rs / codegen_riscv64.rs). `cc`/`gcc` tu pełnią
         // wyłącznie rolę drivera do systemowego asemblera/linkera - nie
         // wnoszą żadnego kodu ani zależności runtime'owych.
-        cmd.arg("-static").arg("-nostdlib");
-    } else {
-        // Program z FFI: pomijamy crt0 (mamy własny `_start`), ale pozwalamy
-        // linkerowi dołączyć biblioteki C i wskazane flagi (`-lc`, `-lm`, ...).
-        cmd.arg("-nostartfiles");
-    }
-    cmd.arg("-e")
+        .arg("-nostdlib")
+        .arg("-e")
         .arg("_start")
         // Tłumi nieszkodliwe ostrzeżenie linkera o brakującej sekcji
         // .note.GNU-stack (nasz asembler jej nie emituje, bo i tak nie
         // generujemy kodu na stosie).
         .arg("-Wa,--noexecstack");
-    for flag in link_flags {
-        cmd.arg(flag);
-    }
     if target == Target::X86_64 {
         cmd.arg("-no-pie");
     }

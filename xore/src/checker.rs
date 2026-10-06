@@ -21,8 +21,6 @@ pub struct SemanticChecker {
     /// Bez tego `check_expr` dla `Expr::Call` mylił nazwy funkcji ze
     /// zmiennymi lokalnymi - był to błąd w oryginalnej wersji tego pliku.
     functions: HashMap<String, FunctionInfo>,
-    /// Typ zwracany aktualnie sprawdzanej funkcji — potrzebny do `return`.
-    current_return_type: Option<Type>,
     pub errors: Vec<CheckError>,
 }
 
@@ -37,7 +35,6 @@ impl SemanticChecker {
         Self {
             scopes: vec![HashMap::new()],
             functions: HashMap::new(),
-            current_return_type: None,
             errors: Vec::new(),
         }
     }
@@ -49,8 +46,7 @@ impl SemanticChecker {
         for stmt in &program.stmts {
             match stmt {
                 Stmt::FnDef { name, params, return_type, .. }
-                | Stmt::FnDecl { name, params, return_type, .. }
-                | Stmt::ExternDecl { name, params, return_type, .. } => {
+                | Stmt::FnDecl { name, params, return_type, .. } => {
                     self.functions.insert(
                         name.clone(),
                         FunctionInfo {
@@ -89,25 +85,9 @@ impl SemanticChecker {
         self.scopes.pop();
     }
 
-    /// Sprawdza blok i zwraca typ wartości ostatniej instrukcji-wyrażenia
-    /// (używane przy wnioskowaniu typu `if`-wyrażenia).
-    fn check_block_value(&mut self, stmts: &[Stmt]) -> Type {
-        self.push_scope();
-        let mut value_type = Type::Unknown;
-        for stmt in stmts {
-            match stmt {
-                Stmt::Expr(expr) => value_type = self.check_expr(expr),
-                Stmt::Return { .. } => value_type = Type::Unknown,
-                _ => self.check_stmt(stmt),
-            }
-        }
-        self.pop_scope();
-        value_type
-    }
-
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let { name, typ, value, is_mut, span } => {
+            Stmt::Let { name, typ, value, span } => {
                 let inferred_type = self.check_expr(value);
 
                 if let Some(expected_type) = typ {
@@ -123,14 +103,12 @@ impl SemanticChecker {
                     name.clone(),
                                                 VariableInfo {
                                                     typ: typ.clone().unwrap_or(inferred_type),
-                                                is_mut: *is_mut,
+                                                is_mut: true,
                                                 },
                 );
             }
-            Stmt::FnDef { params, return_type, body, .. } => {
+            Stmt::FnDef { params, body, .. } => {
                 self.push_scope();
-
-                let prev_return = std::mem::replace(&mut self.current_return_type, return_type.clone());
 
                 for (param_name, param_type) in params {
                     // Parametry tablicowe są przekazywane przez wskaźnik
@@ -150,31 +128,10 @@ impl SemanticChecker {
                     self.check_stmt(stmt);
                 }
 
-                self.current_return_type = prev_return;
                 self.pop_scope();
             }
             Stmt::FnDecl { .. } => {}
             Stmt::Include { .. } => {}
-            Stmt::ExternDecl { .. } => {}
-            Stmt::Link { .. } => {}
-            Stmt::Return { value, span } => {
-                if let Some(value_expr) = value {
-                    let found = self.check_expr(value_expr);
-                    if let Some(expected) = &self.current_return_type {
-                        if !self.types_match(&found, expected) {
-                            self.errors.push(CheckError {
-                                message: format!("return: oczekiwano typu {:?}, znaleziono {:?}", expected, found),
-                                span: *span,
-                            });
-                        }
-                    }
-                } else if let Some(expected) = &self.current_return_type {
-                    self.errors.push(CheckError {
-                        message: format!("return bez wartości w funkcji zwracającej {:?}", expected),
-                        span: *span,
-                    });
-                }
-            }
             Stmt::EnumDef { .. } => {}
             Stmt::Expr(expr) => {
                 self.check_expr(expr);
@@ -212,16 +169,6 @@ impl SemanticChecker {
                                  span: expr.span().unwrap_or_default(),
                 });
                 Type::Unknown
-            }
-            Expr::UnaryOp { op, operand, span } => {
-                let operand_type = self.check_expr(operand);
-                if operand_type != Type::Unknown && !self.is_numeric(&operand_type) {
-                    self.errors.push(CheckError {
-                        message: format!("Operator jednoargumentowy {:?} wymaga typu liczbowego, znaleziono {:?}", op, operand_type),
-                        span: *span,
-                    });
-                }
-                operand_type
             }
             Expr::BinaryOp { left, op, right, span } => {
                 let left_type = self.check_expr(left);
@@ -308,8 +255,8 @@ impl SemanticChecker {
                     }
                     // Operatory arytmetyczne wymagają typów liczbowych i
                     // zwracają typ operandów (zakładamy, że są zgodne).
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                    | BinOp::HashEqEq | BinOp::PipeEq | BinOp::MinusEq => {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::HashEqEq
+                    | BinOp::PipeEq | BinOp::MinusEq => {
                         if left_type != Type::Unknown && !self.is_numeric(&left_type) {
                             self.errors.push(CheckError {
                                 message: format!("Operator {:?} wymaga typu liczbowego, znaleziono {:?}", op, left_type),
@@ -345,54 +292,20 @@ impl SemanticChecker {
                     });
                 }
 
-                let then_ty = self.check_block_value(&then_branch.stmts);
-                let else_ty = else_branch.as_ref().map(|b| self.check_block_value(&b.stmts));
+                self.push_scope();
+                for stmt in &then_branch.stmts {
+                    self.check_stmt(stmt);
+                }
+                self.pop_scope();
 
-                match else_ty {
-                    Some(else_ty) => {
-                        if then_ty != Type::Unknown && else_ty != Type::Unknown
-                            && !self.types_match(&then_ty, &else_ty)
-                        {
-                            self.errors.push(CheckError {
-                                message: format!("Gałęzie if mają różne typy: {:?} i {:?}", then_ty, else_ty),
-                                span: *span,
-                            });
-                        }
-                        then_ty
+                if let Some(else_block) = else_branch {
+                    self.push_scope();
+                    for stmt in &else_block.stmts {
+                        self.check_stmt(stmt);
                     }
-                    None => Type::Unknown,
+                    self.pop_scope();
                 }
-            }
-            Expr::ExternCall { name, args, span, .. } => {
-                let arg_types: Vec<Type> = args.iter().map(|a| self.check_expr(a)).collect();
-                if let Some(info) = self.functions.get(name).cloned() {
-                    if info.params.len() != args.len() {
-                        self.errors.push(CheckError {
-                            message: format!(
-                                "Funkcja zewnętrzna '{}' oczekuje {} argumentów, otrzymano {}",
-                                name, info.params.len(), args.len()
-                            ),
-                            span: *span,
-                        });
-                    } else {
-                        for (i, (expected, found)) in info.params.iter().zip(arg_types.iter()).enumerate() {
-                            if !self.types_match(expected, found) {
-                                self.errors.push(CheckError {
-                                    message: format!(
-                                        "Argument {} funkcji zewnętrznej '{}': oczekiwano {:?}, znaleziono {:?}",
-                                        i + 1, name, expected, found
-                                    ),
-                                    span: *span,
-                                });
-                            }
-                        }
-                    }
-                    return info.return_type;
-                }
-                self.errors.push(CheckError {
-                    message: format!("Wywołanie niezadeklarowanej funkcji zewnętrznej: '{}'", name),
-                    span: *span,
-                });
+
                 Type::Unknown
             }
             Expr::Call { callee, args, span } => {

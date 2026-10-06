@@ -34,10 +34,6 @@ pub enum IrInstruction {
     /// Bez tej instrukcji parametry funkcji byłyby nieinicjalizowane w kodzie maszynowym
     /// - był to brakujący element oryginalnego `lowering.rs`.
     LoadParam { dst: Temp, index: usize },
-    /// Pobiera parametr przekazany na stosie (po wyczerpaniu rejestrów
-    /// argumentów danej klasy). `index` liczy od PRAWEJ strony wywołania:
-    /// 0 = najprawszy parametr stosowy (najniższy adres).
-    LoadParamStack { dst: Temp, index: usize },
     LoadImm { dst: Temp, value: Operand },
     LoadMem { dst: Temp, src: Location },
     StoreMem { dst: Location, src: Temp },
@@ -142,7 +138,6 @@ impl fmt::Display for IrProgram {
 fn format_instruction(instr: &IrInstruction) -> String {
     match instr {
         IrInstruction::LoadParam { dst, index } => format!("{:?} = param#{}", dst, index),
-        IrInstruction::LoadParamStack { dst, index } => format!("{:?} = stack_param#{}", dst, index),
         IrInstruction::LoadImm { dst, value } => format!("{:?} = {:?}", dst, value),
         IrInstruction::LoadMem { dst, src } => format!("{:?} = load {:?}", dst, src),
         IrInstruction::StoreMem { dst, src } => format!("store {:?}, {:?}", dst, src),

@@ -22,7 +22,6 @@ pub enum Stmt {
         name: String,
         typ: Option<Type>,
         value: Box<Expr>,
-        is_mut: bool,
         span: Span,
     },
     FnDef {
@@ -44,29 +43,12 @@ pub enum Stmt {
         path: String,
         span: Span,
     },
-    /// Deklaracja funkcji zewnętrznej (FFI), np. `ext 'c' fn puts(s: String) -> i32;`.
-    ExternDecl {
-        lang: String,
-        name: String,
-        params: Vec<(String, Type)>,
-        return_type: Option<Type>,
-        span: Span,
-    },
-    /// Dyrektywa linkera, np. `link "-lm";` — dodatkowe flagi dla `cc`/`gcc`.
-    Link {
-        flags: Vec<String>,
-        span: Span,
-    },
     EnumDef {
         name: String,
         variants: Vec<String>,
         span: Span,
     },
     Expr(Box<Expr>),
-    Return {
-        value: Option<Box<Expr>>,
-        span: Span,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,54 +59,37 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Literal { value: Literal, typ: Type },
-    Variable { name: String, typ: Type },
+    Literal(Literal),
+    Variable(String),
     BinaryOp {
         left: Box<Expr>,
         op: BinOp,
         right: Box<Expr>,
-        typ: Type,
         span: Span,
     },
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
-        typ: Type,
-        span: Span,
-    },
-    /// Wywołanie funkcji zewnętrznej (FFI), np. `ext::'c'::puts("hi")`.
-    ExternCall {
-        lang: String,
-        name: String,
-        args: Vec<Expr>,
-        typ: Type,
         span: Span,
     },
     ArrayInit {
         elements: Vec<Expr>,
-        typ: Type,
         span: Span,
     },
     /// `tablica[indeks]` - odczyt (i, jako l-value po prawej stronie `$~`,
-    /// zapis) elementu tablicy.
+    /// zapis) elementu tablicy. `array` musi dziś być bezpośrednio zmienną
+    /// (patrz ograniczenia w lowering.rs) - indeksowanie wyrażeń złożonych
+    /// nie jest jeszcze obsługiwane.
     Index {
         array: Box<Expr>,
         index: Box<Expr>,
-        typ: Type,
         span: Span,
     },
     If {
         condition: Box<Expr>,
         then_branch: Block,
         else_branch: Option<Block>,
-        typ: Type,
-        span: Span,
-    },
-    UnaryOp {
-        op: UnaryOp,
-        operand: Box<Expr>,
-        typ: Type,
-        span: Span,
+            span: Span,
     },
 }
 
@@ -133,42 +98,10 @@ impl Expr {
         match self {
             Expr::BinaryOp { span, .. } => Some(*span),
             Expr::Call { span, .. } => Some(*span),
-            Expr::ExternCall { span, .. } => Some(*span),
-            Expr::UnaryOp { span, .. } => Some(*span),
             Expr::ArrayInit { span, .. } => Some(*span),
             Expr::Index { span, .. } => Some(*span),
             Expr::If { span, .. } => Some(*span),
             _ => None,
-        }
-    }
-
-    /// Typ przypisany temu wyrażeniu przez `checker.rs` (otypowany AST).
-    /// Przed type-checkingiem to `Type::Unknown`.
-    pub fn typ(&self) -> Type {
-        match self {
-            Expr::Literal { typ, .. }
-            | Expr::Variable { typ, .. }
-            | Expr::BinaryOp { typ, .. }
-            | Expr::Call { typ, .. }
-            | Expr::ExternCall { typ, .. }
-            | Expr::ArrayInit { typ, .. }
-            | Expr::Index { typ, .. }
-            | Expr::If { typ, .. }
-            | Expr::UnaryOp { typ, .. } => typ.clone(),
-        }
-    }
-
-    pub fn set_typ(&mut self, t: Type) {
-        match self {
-            Expr::Literal { typ, .. }
-            | Expr::Variable { typ, .. }
-            | Expr::BinaryOp { typ, .. }
-            | Expr::Call { typ, .. }
-            | Expr::ExternCall { typ, .. }
-            | Expr::ArrayInit { typ, .. }
-            | Expr::Index { typ, .. }
-            | Expr::If { typ, .. }
-            | Expr::UnaryOp { typ, .. } => *typ = t,
         }
     }
 }
@@ -180,13 +113,6 @@ pub enum Literal {
     String(String),
     Bool(bool),
     None,
-}
-
-/// Operator jednoargumentowy (`-x`, `+x`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnaryOp {
-    Neg,
-    Pos,
 }
 
 #[allow(dead_code)]

@@ -1,0 +1,18 @@
+public fn add(a: i32, b: i32) -> i32 { a + b; }
+public fn mul(a: i32, b: i32) -> i32 { a * b; }
+public fn maxi(a: i32, b: i32) -> i32 {
+    if a > b {
+        a;
+    } else {
+        b;
+    };
+}
+public fn compute(x: i32) -> i32 {
+    let doubled: i32 = mul $ (x, 2);
+    let bigger: i32 = maxi $ (doubled, 10);
+    let result: i32 = add $ (bigger, 1);
+    result;
+}
+public fn main() -> i32 {
+    compute $ (20);
+}
