@@ -1,0 +1,73 @@
+.
+├── Cargo.toml
+├── cppsrc
+├── crates
+│   ├── base
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── gencode
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── lib.rs
+│   ├── xore
+│   │   ├── Cargo.toml
+│   │   └── src
+│   │       └── main.rs
+│   └── xore-core
+│       ├── Cargo.toml
+│       └── src
+│           └── lib.rs
+├── csrc
+├── odinsrc
+├── old
+│   ├── Cargo.lock
+│   ├── Cargo.toml
+│   ├── main.xre
+│   ├── src
+│   │   ├── ast.rs
+│   │   ├── checker.rs
+│   │   ├── codegen_riscv64.rs
+│   │   ├── codegen_x86_64.rs
+│   │   ├── ir.rs
+│   │   ├── lexer.rs
+│   │   ├── link.rs
+│   │   ├── lowering.rs
+│   │   ├── main.rs
+│   │   ├── module.rs
+│   │   ├── numlit.rs
+│   │   ├── optimize.rs
+│   │   ├── parser.rs
+│   │   ├── regalloc.rs
+│   │   └── style.rs
+│   ├── test2.xre
+│   ├── test.xre
+│   ├── utils.xrh
+│   ├── xore
+│   │   ├── Cargo.lock
+│   │   ├── Cargo.toml
+│   │   ├── main.xre
+│   │   ├── src
+│   │   │   ├── ast.rs
+│   │   │   ├── checker.rs
+│   │   │   ├── codegen_riscv64.rs
+│   │   │   ├── codegen_x86_64.rs
+│   │   │   ├── ir.rs
+│   │   │   ├── lexer.rs
+│   │   │   ├── link.rs
+│   │   │   ├── lowering.rs
+│   │   │   ├── main.rs
+│   │   │   ├── module.rs
+│   │   │   ├── numlit.rs
+│   │   │   ├── optimize.rs
+│   │   │   ├── parser.rs
+│   │   │   └── regalloc.rs
+│   │   ├── test2.xre
+│   │   ├── test.xre
+│   │   └── utils.xrh
+│   ├── xore-docs-en(2).md
+│   └── xore-docs-pl(1).md
+├── src
+└── tree.txt
+
+18 directories, 53 files

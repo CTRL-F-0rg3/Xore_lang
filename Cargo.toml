@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/base","crates/core", "crates/gencode", "crates/xore"]
+exclude = ["old"]
+
+[workspace.package]
+edition = "2024"
+version = "0.5.0"
+authors = ["ctrl_F0rg3"]
+
+[workspace.dependencies]
+# wspólne zależności dla wszystkich crates, np.:
+# anyhow = "1"
+# clap = { version = "4", features = ["derive"] }
